@@ -8,6 +8,7 @@ import ReactFlow, {
   Node,
   MarkerType,
 } from "reactflow";
+import { pathEdges } from "../lib/narrative";
 import type { GraphEdge, GraphNode, TraceStep } from "../lib/types";
 
 interface Props {
@@ -17,7 +18,6 @@ interface Props {
   culpritName?: string | null;
 }
 
-// Hand-tuned layout for the seven mission-controller modes.
 const LAYOUT: Record<string, { x: number; y: number }> = {
   Idle: { x: 40, y: 120 },
   Armed: { x: 200, y: 120 },
@@ -34,42 +34,43 @@ function fallbackLayout(id: string, index: number) {
 }
 
 export function StateGraph({ nodes, edges, counterexample, culpritName }: Props) {
-  const { rfNodes, rfEdges } = useMemo(() => {
-    // Build a set of edges traversed by the counterexample.
-    const cePath = new Set<string>();
-    if (counterexample && counterexample.length > 1) {
-      for (let i = 0; i < counterexample.length - 1; i++) {
-        const cur = counterexample[i];
-        const nxt = counterexample[i + 1];
-        const trans = cur.transition;
-        const src = cur.mode as string;
-        const dst = nxt.mode as string;
-        if (typeof trans === "string" && trans !== "stutter" && src && dst) {
-          cePath.add(`${trans}|${src}|${dst}`);
-        }
-      }
-    }
-    const cePathTransitions = new Set(
-      Array.from(cePath).map((k) => k.split("|")[0])
-    );
+  const hasCounterexample = !!counterexample && counterexample.length > 1;
+
+  const { rfNodes, rfEdges, caption } = useMemo(() => {
+    // Build numbered edges from the counterexample.
+    const pathList = hasCounterexample ? pathEdges(counterexample!) : [];
+    const pathOrder = new Map<string, number>();
+    pathList.forEach((p, i) => {
+      pathOrder.set(`${p.transition}|${p.source}|${p.target}`, i + 1);
+    });
+    const pathTransitions = new Set(pathList.map((p) => p.transition));
     const finalMode = counterexample?.[counterexample.length - 1]?.mode as
       | string
       | undefined;
+    const onPathNodeIds = new Set<string>(
+      pathList.flatMap((p) => [p.source, p.target])
+    );
+    if (counterexample) {
+      for (const s of counterexample) {
+        if (s.mode) onPathNodeIds.add(s.mode as string);
+      }
+    }
 
     const rfNodes: Node[] = nodes.map((n, i) => {
       const pos = fallbackLayout(n.id, i);
-      const onCePath = counterexample?.some((step) => step.mode === n.id) ?? false;
+      const onPath = hasCounterexample && onPathNodeIds.has(n.id);
       const isFinal = finalMode === n.id;
       const bg = isFinal
         ? "#3a0d18"
-        : onCePath
-        ? "#251525"
+        : onPath
+        ? "#1f1a2a"
         : "#1a1f29";
       const border = isFinal
         ? "#f43f5e"
-        : onCePath
+        : onPath
         ? "#7c3aed"
         : "#2c333f";
+      const opacity = hasCounterexample && !onPath ? 0.35 : 1;
       return {
         id: n.id,
         position: pos,
@@ -83,63 +84,75 @@ export function StateGraph({ nodes, edges, counterexample, culpritName }: Props)
           fontSize: 13,
           width: 130,
           textAlign: "center" as const,
+          opacity,
         },
       };
     });
 
-    const rfEdges: Edge[] = edges.map((e) => {
-      const onPath = cePath.has(`${e.label}|${e.source}|${e.target}`);
-      const isCulprit = culpritName === e.label;
-      const isReactive = e.reactive;
-      // visual hierarchy: culprit > onPath > reactive > normal
-      const stroke = isCulprit
-        ? "#f43f5e"
-        : onPath
-        ? "#a855f7"
-        : isReactive
-        ? "#0ea5e9"
-        : "#414957";
-      const strokeWidth = isCulprit ? 2.5 : onPath ? 2 : 1.2;
-      const labelTone = isCulprit
-        ? "#fecdd3"
-        : onPath
-        ? "#e9d5ff"
-        : isReactive
-        ? "#bae6fd"
-        : "#bcc4d3";
-      return {
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        label: e.label,
-        animated: onPath || isCulprit,
-        style: { stroke, strokeWidth },
-        labelStyle: { fill: labelTone, fontFamily: "JetBrains Mono", fontSize: 10 },
-        labelBgStyle: { fill: "#070b12", fillOpacity: 0.95 },
-        labelBgPadding: [4, 2] as [number, number],
-        labelBgBorderRadius: 4,
-        markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
-        type: e.source === e.target ? "default" : undefined,
-      };
-    });
+    const rfEdges: Edge[] = edges
+      .filter((e) => e.source !== e.target)
+      .map((e) => {
+        const order = pathOrder.get(`${e.label}|${e.source}|${e.target}`);
+        const onPath = order !== undefined;
+        const isCulprit = culpritName === e.label;
 
-    // Filter edges drawn in the graph to only those that involve the mode
-    // changes; we drop the spurious self-loops the backend may have emitted
-    // for transitions whose source we could not infer.
-    const filtered = rfEdges.filter((e) => e.source !== e.target);
-    void cePathTransitions; // reserved for future tooltips
-    return { rfNodes, rfEdges: filtered };
-  }, [nodes, edges, counterexample, culpritName]);
+        let stroke = "#414957";
+        let strokeWidth = 1.2;
+        let label = e.label;
+        let opacity = 1;
+        let labelTone = "#bcc4d3";
+
+        if (hasCounterexample) {
+          // Fade non-path edges to focus the eye on the violation chain.
+          if (!onPath) {
+            opacity = 0.18;
+          }
+        }
+
+        if (e.reactive && !onPath && !isCulprit) {
+          stroke = "#0ea5e9";
+          labelTone = "#bae6fd";
+        }
+
+        if (onPath) {
+          stroke = isCulprit ? "#f43f5e" : "#a855f7";
+          strokeWidth = isCulprit ? 2.8 : 2;
+          label = `${order}. ${isCulprit ? "unsafe actuation" : e.label}`;
+          labelTone = isCulprit ? "#fecdd3" : "#e9d5ff";
+        } else if (isCulprit) {
+          stroke = "#f43f5e";
+          strokeWidth = 2.5;
+          label = `unsafe actuation`;
+          labelTone = "#fecdd3";
+        }
+
+        return {
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          label,
+          animated: onPath || isCulprit,
+          style: { stroke, strokeWidth, opacity },
+          labelStyle: { fill: labelTone, fontFamily: "JetBrains Mono", fontSize: 10 },
+          labelBgStyle: { fill: "#070b12", fillOpacity: 0.95 },
+          labelBgPadding: [4, 2] as [number, number],
+          labelBgBorderRadius: 4,
+          markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
+        };
+      });
+
+    void pathTransitions;
+    const caption = hasCounterexample
+      ? "The verifier found this reachable path through the controller. Each numbered edge is a step in the unsafe execution."
+      : "Controller states and transitions. Reactive transitions in blue.";
+
+    return { rfNodes, rfEdges, caption };
+  }, [nodes, edges, counterexample, culpritName, hasCounterexample]);
 
   return (
-    <section id="state-graph">
-      <div className="mb-3 flex items-baseline justify-between">
-        <h3 className="text-lg font-semibold text-ink-100">Controller state graph</h3>
-        <span className="text-xs text-ink-400">
-          Nodes are modes; edges are transitions. Reactive transitions in blue, counterexample path in violet, culprit in rose.
-        </span>
-      </div>
-      <div className="h-[420px] rounded-xl border border-ink-800 bg-ink-900/40">
+    <div>
+      <p className="mb-3 text-sm text-ink-300">{caption}</p>
+      <div className="h-[380px] rounded-xl border border-ink-800 bg-ink-900/40">
         <ReactFlow
           nodes={rfNodes}
           edges={rfEdges}
@@ -157,6 +170,6 @@ export function StateGraph({ nodes, edges, counterexample, culpritName }: Props)
           <Controls showInteractive={false} />
         </ReactFlow>
       </div>
-    </section>
+    </div>
   );
 }
