@@ -1,0 +1,42 @@
+properties:
+  - name: no_actuate_without_authority
+    title: Human Oversight
+    description: >
+      The platform must never enter the Actuate mode while communications are
+      lost and no human operator has authorized the command.
+    type: invariant
+    condition: "not (mode == Actuate and comms == Lost and human_authorized == false)"
+
+  - name: no_actuate_on_sensor_disagreement
+    title: Sensor Safety
+    description: >
+      The platform must never actuate while its safety-critical sensors
+      disagree.
+    type: invariant
+    condition: "not (mode == Actuate and sensor_agreement == false)"
+
+  - name: low_battery_recovers_within_2
+    title: Low Battery Recovery
+    description: >
+      Once the battery is low while in Mission or DegradedComms, the platform
+      must reach a safe recovery mode within two steps.
+    type: bounded_response
+    trigger: "(mode == Mission or mode == DegradedComms) and battery == Low"
+    response: "mode == Recovery or mode == EmergencyLand"
+    bound: 2
+
+  - name: mission_requires_armed_history
+    title: Armed Before Mission
+    description: >
+      The platform must never be in Mission mode without having been armed
+      at some point.
+    type: invariant
+    condition: "not (mode == Mission and armed_before == false)"
+
+  - name: gps_loss_prevents_mission_start
+    title: GPS Safety
+    description: >
+      The platform must never be in Mission mode with GPS lost; GPS loss is
+      only permitted prior to mission start.
+    type: invariant
+    condition: "not (mode == Mission and gps == Lost)"

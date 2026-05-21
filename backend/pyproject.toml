@@ -1,0 +1,9 @@
+[project]
+name = "assurance-studio-backend"
+version = "0.1.0"
+description = "Bounded model checking backend for Assurance Studio."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

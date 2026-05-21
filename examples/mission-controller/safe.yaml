@@ -1,0 +1,118 @@
+name: autonomous_mission_controller
+title: Autonomous Mission Controller (Safe baseline)
+description: >
+  Simplified mission controller for an autonomous platform. The controller is
+  responsible for arming, flying a mission, gracefully degrading when
+  communications are lost, and performing emergency landing under low battery.
+  The "Actuate" mode represents an irreversible safety-critical command (e.g.
+  payload release) that must be guarded by human authorization and consistent
+  sensor evidence.
+
+variables:
+  mode:
+    type: enum
+    values: [Idle, Armed, Mission, DegradedComms, Recovery, EmergencyLand, Actuate]
+    initial: Idle
+  comms:
+    type: enum
+    values: [OK, Lost]
+    initial: OK
+  gps:
+    type: enum
+    values: [OK, Lost]
+    initial: OK
+  battery:
+    type: enum
+    values: [High, Low]
+    initial: High
+  human_authorized:
+    type: bool
+    initial: false
+  sensor_agreement:
+    type: bool
+    initial: true
+  armed_before:
+    type: bool
+    initial: false
+
+transitions:
+  # --- Reactive safety transitions (fire automatically when guard holds) ---
+  - name: low_battery_recovery
+    reactive: true
+    guard: "(mode == Mission or mode == DegradedComms) and battery == Low"
+    updates:
+      mode: Recovery
+
+  - name: comms_degrade
+    reactive: true
+    guard: "mode == Mission and comms == Lost"
+    updates:
+      mode: DegradedComms
+
+  # --- System control transitions ---
+  - name: arm
+    guard: "mode == Idle and human_authorized == true"
+    updates:
+      mode: Armed
+      armed_before: true
+
+  - name: start_mission
+    guard: "mode == Armed and gps == OK and battery == High"
+    updates:
+      mode: Mission
+
+  - name: emergency_land
+    guard: "mode == Recovery"
+    updates:
+      mode: EmergencyLand
+
+  - name: authorized_actuation
+    guard: "mode == DegradedComms and comms == Lost and human_authorized == true and sensor_agreement == true"
+    updates:
+      mode: Actuate
+
+  # --- Environment / operator events (model the world's inputs) ---
+  - name: operator_authorize
+    guard: "human_authorized == false and (mode == Idle or mode == Armed)"
+    updates:
+      human_authorized: true
+
+  - name: operator_revoke
+    guard: "human_authorized == true and (mode == Idle or mode == Armed)"
+    updates:
+      human_authorized: false
+
+  - name: comms_loss
+    guard: "comms == OK"
+    updates:
+      comms: Lost
+
+  - name: comms_restore
+    guard: "comms == Lost"
+    updates:
+      comms: OK
+
+  - name: gps_loss
+    guard: "gps == OK and (mode == Idle or mode == Armed)"
+    updates:
+      gps: Lost
+
+  - name: gps_restore
+    guard: "gps == Lost"
+    updates:
+      gps: OK
+
+  - name: battery_drain
+    guard: "battery == High"
+    updates:
+      battery: Low
+
+  - name: sensor_disagree
+    guard: "sensor_agreement == true and (mode == Idle or mode == Armed)"
+    updates:
+      sensor_agreement: false
+
+  - name: sensor_agree
+    guard: "sensor_agreement == false"
+    updates:
+      sensor_agreement: true
