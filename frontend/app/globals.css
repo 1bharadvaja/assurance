@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: #070b12;
+  color: #eef0f4;
+}
+
+/* React Flow tweaks for dark theme */
+.react-flow__node-default {
+  background: #1a1f29 !important;
+  color: #eef0f4 !important;
+  border: 1px solid #2c333f !important;
+  border-radius: 10px !important;
+  font-family: -apple-system, BlinkMacSystemFont, Inter, sans-serif !important;
+  font-size: 13px !important;
+  padding: 10px 14px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+.react-flow__node.selected .react-flow__node-default,
+.react-flow__node.selected {
+  outline: 1px solid #3b82f6;
+}
+.react-flow__edge-text {
+  fill: #bcc4d3 !important;
+  font-size: 11px !important;
+  font-family: "JetBrains Mono", ui-monospace, monospace !important;
+}
+.react-flow__edge-textbg {
+  fill: #070b12 !important;
+}
+.react-flow__controls button {
+  background: #1a1f29 !important;
+  color: #eef0f4 !important;
+  border-bottom: 1px solid #2c333f !important;
+}
+.react-flow__attribution {
+  background: transparent !important;
+  color: #5f6878 !important;
+}
+
+/* Hide React Flow attribution background but keep link visible (license) */
+.react-flow__attribution a {
+  color: #5f6878 !important;
+}
+
+/* scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #070b12;
+}
+::-webkit-scrollbar-thumb {
+  background: #2c333f;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #414957;
+}

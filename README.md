@@ -1,1 +1,366 @@
-# assurance
+# Assurance Studio
+
+**Interactive Verification for Mission-Critical Autonomy.**
+
+Assurance Studio is a small research-engineering prototype that connects
+mission requirements to a system model, checks formal guarantees with an
+SMT-backed bounded model checker, surfaces counterexamples with operational
+explanations, and re-verifies after a targeted repair. The verification
+core is real: it uses Z3 to perform bounded reachability and bounded-response
+checks against a finite state-machine model loaded from YAML.
+
+> The demo scenario is an Autonomous Mission Controller — a simplified
+> autonomous platform whose actuation is supposed to require human
+> authorization. The demo shows what happens when a single guard predicate
+> is silently removed, and how a targeted repair restores the property.
+
+---
+
+## 1. Overview
+
+| Layer       | Stack                                                     |
+| ----------- | --------------------------------------------------------- |
+| Frontend    | Next.js 14 (App Router) · TypeScript · Tailwind · React Flow |
+| Backend     | Python 3.11+ · FastAPI · Pydantic · PyYAML · `z3-solver`  |
+| Solver core | Z3 bounded model checking                                 |
+
+The backend exposes four endpoints:
+
+- `GET  /api/scenarios` — list bundled scenarios
+- `GET  /api/scenarios/{id}` — fetch a scenario (safe model, regressed model, properties, graph)
+- `POST /api/verify` — verify a model against a set of properties at a given bound
+- `POST /api/assurance-diff` — diff two model versions; classify each property
+  as preserved / regression / fixed / existing failure, with culprit
+  transition and suggested repair attached to each regression
+- `POST /api/apply-repair` — return a new model with the repair applied
+
+The frontend is a single-page workbench that walks through the demo flow
+visually (hero → mission brief → guarantee cards → state graph → model change
+→ run verification → counterexample → culprit → repair → re-verify → export).
+
+---
+
+## 2. Why this exists
+
+Most "AI for software" demos are LLM wrappers around code completion or
+chat. The interesting unsolved problems are upstream of that: how do you
+*understand* what a mission-critical system is supposed to do, encode it
+in a form a machine can reason about, and tell you — concretely — when a
+proposed change breaks an assumption that operators are relying on?
+
+Assurance Studio is a tiny vertical slice of that idea:
+
+- The **model** is a finite, declarative state machine.
+- The **requirements** are first-class properties (invariants and
+  bounded-response constraints).
+- A **regression** is shown as a concrete counterexample, not a vague
+  warning.
+- A **repair** is a deterministic, auditable edit to the model that the
+  user can review and apply.
+- The whole thing is re-verifiable: after the repair, the same SMT
+  query that produced the counterexample now reports `unsat` up to
+  bound *K*.
+
+---
+
+## 3. Demo flow
+
+The on-screen flow matches the structure of a two-minute video walkthrough:
+
+1. **Mission brief** — describes the autonomous platform and the
+   operational risk (actuating an irreversible payload while disconnected
+   from the operator).
+2. **Mission requirements** — five guarantees, each labelled by status
+   (unchecked → passed / failed).
+3. **State graph** — controller modes and transitions. After
+   verification, the counterexample path is highlighted in violet and the
+   culprit transition in rose.
+4. **Model change panel** — side-by-side diff of the safe-baseline guard
+   versus the regressed guard for `authorized_actuation`. A toggle lets
+   you introduce or remove the regression.
+5. **Run verification** — calls the backend, returns per-property
+   pass / fail tiles.
+6. **Counterexample trace** — table of variable values at every step
+   together with the transition that fired, with the violating state
+   highlighted.
+7. **Culprit transition** — the transition that produced the violation,
+   shown with safe vs. regressed guards and the missing predicate.
+8. **Suggested repair** — re-introduce the missing predicate; one-click
+   apply triggers re-verification and flips the failing guarantee back to
+   passing.
+9. **Export** — JSON and Markdown assurance report.
+
+---
+
+## 4. Architecture
+
+```
++----------------------+        HTTP (JSON)        +-----------------------+
+|  Next.js Frontend    |  <--------------------->  |  FastAPI Backend     |
+|  (React Flow UI)     |                           |  - Guard parser      |
+|                      |                           |  - Z3 BMC engine     |
++----------------------+                           |  - Repair suggester  |
+                                                   +-----------+----------+
+                                                               |
+                                                               v
+                                                        +-------------+
+                                                        |   Z3 SMT    |
+                                                        +-------------+
+```
+
+Layout:
+
+```
+assurance-studio/
+├── README.md
+├── docker-compose.yml
+├── .gitignore
+├── backend/
+│   ├── requirements.txt
+│   ├── pyproject.toml
+│   ├── Dockerfile
+│   ├── app/
+│   │   ├── main.py           # FastAPI endpoints
+│   │   ├── models.py         # Pydantic models
+│   │   ├── parser.py         # YAML loaders + structural validation
+│   │   ├── guards.py         # Safe guard parser + evaluator
+│   │   ├── verifier.py       # Z3 bounded model checker
+│   │   ├── properties.py     # Property utilities
+│   │   ├── counterexample.py # Culprit-transition heuristic
+│   │   ├── diff.py           # Regression classification
+│   │   ├── repair.py         # Targeted repair suggestion / apply
+│   │   ├── explain.py        # Deterministic explanation templates
+│   │   └── examples.py       # Bundled scenarios
+│   └── tests/                # pytest suite
+├── frontend/
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── tailwind.config.ts
+│   ├── Dockerfile
+│   ├── app/                  # Next.js App Router
+│   ├── components/           # All UI panels
+│   └── lib/                  # API client + shared types
+└── examples/
+    └── mission-controller/
+        ├── safe.yaml
+        ├── regressed.yaml
+        └── properties.yaml
+```
+
+---
+
+## 5. Formal model
+
+A model is a finite, deterministic state-machine described in YAML.
+
+**Variables** are either enums (with a fixed value set) or booleans. Every
+variable has an explicit `initial` value.
+
+**Transitions** are guarded updates:
+
+```yaml
+- name: authorized_actuation
+  guard: "mode == DegradedComms and comms == Lost and human_authorized == true and sensor_agreement == true"
+  updates:
+    mode: Actuate
+```
+
+A transition can additionally be `reactive: true`. Reactive transitions
+have priority: if their guard is satisfied at time `t`, they *must* fire
+(in the order they appear in the file). This is how we model safety
+responses — for example, `low_battery_recovery` and `comms_degrade` are
+reactive in the bundled scenario, so the platform cannot ignore a low
+battery in flight.
+
+**Guards** are written in a small subset of Python expressions:
+
+```
+expr        := bool_term ('or' bool_term)*
+bool_term   := bool_factor ('and' bool_factor)*
+bool_factor := 'not' bool_factor | '(' expr ')' | atom
+atom        := name comparator value
+             | name 'in' '[' value (, value)* ']'
+             | name 'not' 'in' '[' ... ']'
+value       := name | 'true' | 'false'
+comparator  := '==' | '!='
+```
+
+The parser uses Python's `ast` module to obtain a syntax tree and then
+validates that only allow-listed node types appear. **No call to `eval`
+is ever made.** Attribute access, subscripting, function calls,
+arithmetic, string literals, and chained comparisons are all rejected.
+
+**Properties** come in two flavors:
+
+| Type                | Condition shape                                                |
+| ------------------- | -------------------------------------------------------------- |
+| `invariant`         | `condition` is a Boolean expression that must hold at every reachable state up to bound *K*. |
+| `bounded_response`  | If `trigger` holds at time `t`, then `response` must hold at some `t' ∈ [t, t+bound]`. |
+
+---
+
+## 6. Verification semantics
+
+The verifier is a textbook bounded model checker built on Z3.
+
+For a model `M`, properties `Φ`, and bound *K*:
+
+1. Each variable is given a fresh Z3 sort: enums use Z3 `EnumSort`,
+   bools use Z3 `Bool`. Constants are time-indexed, so `mode_0`, `mode_1`,
+   …, `mode_K` represent the value of `mode` at each step.
+
+2. The initial state is asserted at time 0 from the YAML `initial`
+   fields.
+
+3. At each step `t → t+1`, an integer choice variable `trans_t` picks
+   one of the transitions (or a stutter). The semantics are:
+
+   - If `trans_t == i` then `guard_i(state_t)` must hold and every
+     variable in `updates_i` takes its new value at `t+1`. Variables not
+     mentioned in `updates_i` retain their old value.
+   - The stutter option freezes all variables.
+   - Reactive transitions add a priority constraint: if a reactive
+     transition's guard holds at `t` and no higher-priority reactive
+     guard holds, the chooser must select that reactive index.
+
+4. The property is then encoded:
+
+   - **Invariant** — assert `∃ t ∈ [0, K] : ¬condition(t)`. A model
+     returning `sat` is a counterexample; the trace is reconstructed
+     from the SMT model.
+   - **Bounded response** — for each candidate `t₀ ∈ [0, K - B]`,
+     create a flag `viol_t0 ↔ trigger(t₀) ∧ ∀ t' ∈ [t₀, t₀+B] : ¬response(t')`,
+     then assert their disjunction. The earliest `t₀` with `viol_t0`
+     true identifies the failing horizon.
+
+5. The culprit transition is the most recent non-stutter transition in
+   the trace whose `updates` set `mode` to the violating state's value.
+   This heuristic is correct for the bundled scenario's regressions and
+   suitable for the demo.
+
+6. The targeted repair re-conjoins a missing predicate onto the
+   culprit's guard. The repaired model is re-verified end to end.
+
+> **This is bounded verification, not full unbounded proof.** A `pass`
+> result certifies the absence of counterexamples up to *K* steps. For
+> the bundled scenario *K = 8–10* is enough to expose every regression
+> and to confirm the repair.
+
+---
+
+## 7. Running locally
+
+You will need:
+
+- Python 3.11+
+- Node.js 18+ and npm
+- `git`
+
+**Backend** (terminal 1):
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+Backend should now respond at `http://localhost:8000/api/health` with
+`{"status":"ok"}`.
+
+Run the test suite:
+
+```bash
+cd backend
+source .venv/bin/activate
+pytest
+```
+
+**Frontend** (terminal 2):
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+If your backend is on a non-default host, set
+`NEXT_PUBLIC_API_BASE=http://...` before `npm run dev`.
+
+**Docker Compose** (single command):
+
+```bash
+docker compose up --build
+```
+
+This builds and runs both services. The frontend will be on port 3000
+and the backend on port 8000.
+
+---
+
+## 8. Deploying
+
+The two services are independently deployable.
+
+**Backend** — any container host that can run FastAPI works. The bundle
+is tiny:
+
+- `backend/Dockerfile` is provided. Render, Railway, Fly.io, and
+  Cloud Run all work; bind to port `8000`.
+
+**Frontend** — Vercel is the natural target.
+
+- Connect the repo and point Vercel at `frontend/`.
+- Add an environment variable: `NEXT_PUBLIC_API_BASE=https://your-backend.example.com`.
+
+---
+
+## 9. Limitations
+
+This is a prototype, not a product. In particular:
+
+- **Bounded only.** A passing result is *certified up to bound K*. There
+  is no inductive invariant generation here. For a state machine of
+  this size, the demo bound is sufficient; for larger systems you would
+  reach for k-induction, IC3/PDR, or symbolic abstractions.
+- **Finite, abstract domain.** Variables are enums and booleans. No
+  integers, no continuous time, no real-valued sensor noise — that
+  abstraction is what makes the verifier tractable.
+- **No code-level verification.** This is verifying a *model* of the
+  controller, not the source code of any flight stack. Connecting a
+  model to real code is an open research problem (e.g. via a verified
+  refinement step).
+- **Targeted repair only.** The repair suggester re-introduces one
+  missing predicate on one transition. It is *not* a general
+  program-synthesis engine. We surface a repair only for regressions we
+  have a deterministic template for.
+- **No environment assumptions language.** Environment events (operator
+  authorization, comms loss, GPS loss, battery drain, sensor
+  disagreement) are themselves modelled as guarded transitions; we do
+  not have a separate assume/guarantee contract layer.
+
+---
+
+## 10. Future work
+
+Things that would push this from demo toward research artefact:
+
+- **k-induction or IC3** for unbounded proofs of safety properties.
+- **Inductive invariant inference** so we can talk about "this property
+  holds for all *k*", not just *k ≤ 10*.
+- **Generic guard strengthening** — given a failed invariant, infer the
+  missing conjunct(s) automatically via abductive reasoning over the
+  state space, rather than from a hard-coded template.
+- **Liveness / fairness** — temporal operators beyond bounded response;
+  full LTL or CTL.
+- **Probabilistic / hybrid models** — replace the boolean / enum sort
+  with intervals and add MDP-style transitions for sensor noise.
+- **Source-level connection** — generate the YAML model from annotated
+  source via abstract interpretation, then validate refinement.
+- **Assume / guarantee contracts** between environment and controller
+  with their own first-class verification.
+- **More scenarios** — collision avoidance, multi-agent handover,
+  power-budget planning, etc.

@@ -19,6 +19,7 @@ dist/
 .npm/
 .pnpm-store/
 .turbo/
+*.tsbuildinfo
 
 # --- OS / IDE ---
 .DS_Store
