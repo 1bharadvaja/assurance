@@ -6,13 +6,13 @@ import type { ReactNode } from "react";
 export const metadata: Metadata = {
   title: "Assurance Studio",
   description:
-    "Interactive proof regression testing for mission-critical autonomy.",
+    "Check whether a controller change broke a safety rule.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className="dark">
-      <body className="bg-ink-950 text-ink-100 antialiased font-sans">
+    <html lang="en">
+      <body className="bg-page text-ink-900 antialiased font-sans">
         {children}
       </body>
     </html>

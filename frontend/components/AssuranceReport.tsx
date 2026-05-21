@@ -1,6 +1,5 @@
 "use client";
 
-import { Download } from "lucide-react";
 import type {
   AssuranceDiffResponse,
   ModelSpec,
@@ -22,31 +21,30 @@ interface Props {
 
 export function AssuranceReport(props: Props) {
   return (
-    <section id="report" className="rounded-xl border border-ink-800 bg-ink-900/60 p-5 shadow-card">
-      <div className="flex items-center justify-between">
+    <section className="border-t border-line pt-6">
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
-          <div className="text-sm uppercase tracking-widest text-ink-400">Export</div>
-          <h3 className="mt-1 text-lg font-semibold text-ink-100">Assurance report</h3>
-          <p className="mt-1 text-sm text-ink-300">
-            Bundle the current model, properties, and verification outcome into a
-            reviewable artifact.
+          <h3 className="text-[14px] font-semibold tracking-tight text-ink-900">
+            Export evidence
+          </h3>
+          <p className="mt-1 max-w-xl text-[13px] text-ink-500">
+            Save the model, checks, and counterexample (if any) for review or
+            attaching to a PR.
           </p>
         </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => downloadJSON(props)}
-            className="inline-flex items-center gap-2 rounded-md border border-ink-700 bg-ink-900 px-3 py-2 text-sm text-ink-100 hover:bg-ink-800"
+            className="rounded border border-line bg-paper px-3 py-1.5 text-[12.5px] text-ink-700 transition hover:bg-ink-50"
           >
-            <Download className="h-4 w-4" />
             JSON
           </button>
           <button
             type="button"
             onClick={() => downloadMarkdown(props)}
-            className="inline-flex items-center gap-2 rounded-md border border-ink-700 bg-ink-900 px-3 py-2 text-sm text-ink-100 hover:bg-ink-800"
+            className="rounded border border-line bg-paper px-3 py-1.5 text-[12.5px] text-ink-700 transition hover:bg-ink-50"
           >
-            <Download className="h-4 w-4" />
             Markdown
           </button>
         </div>
@@ -80,19 +78,21 @@ function downloadJSON(p: Props) {
 function downloadMarkdown(p: Props) {
   const payload = buildPayload(p);
   const lines: string[] = [];
-  lines.push(`# Assurance Report — ${payload.scenario}`);
+  lines.push(`# Assurance report — ${payload.scenario}`);
   lines.push("");
   lines.push(`- Model: ${payload.model_title}`);
   lines.push(`- Bound: ${payload.bound}`);
-  lines.push(`- Generated at: ${payload.generated_at}`);
+  lines.push(`- Generated: ${payload.generated_at}`);
   if (payload.applied_repair) {
-    lines.push(`- Repair applied: \`${payload.applied_repair.transition}\` += \`${payload.applied_repair.add_predicate}\``);
+    lines.push(
+      `- Repair applied: \`${payload.applied_repair.transition}\` += \`${payload.applied_repair.add_predicate}\``
+    );
   }
   lines.push("");
-  lines.push("## Guarantees");
+  lines.push("## Checks");
   for (const r of payload.verification?.results ?? []) {
     lines.push(
-      `- **${r.title || r.property}** (\`${r.property}\`): ${r.status} (${r.elapsed_ms?.toFixed(0) ?? "?"} ms)`
+      `- ${r.status === "pass" ? "✓" : "✗"} **${r.title || r.property}** (\`${r.property}\`) — ${r.elapsed_ms?.toFixed(0) ?? "?"} ms`
     );
   }
   if ((payload.regressions ?? []).length > 0) {
@@ -104,15 +104,14 @@ function downloadMarkdown(p: Props) {
       lines.push(reg.explanation);
       lines.push("");
       if (reg.culprit_transition) {
-        lines.push(`Culprit transition: \`${reg.culprit_transition.name}\``);
-        lines.push("");
+        lines.push(`Where it broke: \`${reg.culprit_transition.name}\``);
         lines.push("```");
         lines.push(`guard: ${reg.culprit_transition.guard}`);
         lines.push("```");
       }
       if (reg.suggested_repair) {
         lines.push(
-          `Suggested repair: add \`${reg.suggested_repair.add_predicate}\` to \`${reg.suggested_repair.transition}\``
+          `Fix: add \`${reg.suggested_repair.add_predicate}\` to \`${reg.suggested_repair.transition}\``
         );
       }
     }

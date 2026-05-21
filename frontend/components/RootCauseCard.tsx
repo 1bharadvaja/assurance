@@ -1,6 +1,5 @@
 "use client";
 
-import { AlertOctagon } from "lucide-react";
 import { Disclosure } from "./Disclosure";
 
 interface Props {
@@ -17,52 +16,36 @@ export function RootCauseCard({
   newGuard,
 }: Props) {
   return (
-    <div className="rounded-2xl border border-rose-500/40 bg-rose-500/[0.05] p-6 shadow-card">
-      <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-rose-300">
-        <AlertOctagon className="h-4 w-4" />
-        Root cause
+    <section>
+      <div className="flex items-baseline justify-between border-b border-line pb-2">
+        <h3 className="text-[15px] font-semibold tracking-tight text-ink-900">
+          Where it broke
+        </h3>
+        <span className="font-mono text-[11px] text-ink-400">{transitionName}</span>
       </div>
-      <h3 className="mt-2 text-2xl font-semibold text-rose-50">
-        Missing human-authorization guard
-      </h3>
 
-      <p className="mt-3 max-w-3xl leading-relaxed text-rose-100">
-        The transition <span className="font-mono text-rose-200">{transitionName}</span>{" "}
-        can now fire in <span className="font-mono">DegradedComms</span> whenever
-        sensors agree, even if no human has authorized the action.
+      <p className="mt-3 max-w-2xl text-[14.5px] leading-relaxed text-ink-800">
+        The changed guard no longer checks{" "}
+        <code className="font-mono text-ink-900">human_authorized</code>. Once
+        the system is in <code className="font-mono text-ink-900">DegradedComms</code>,
+        the actuation transition can fire with comms lost and no current
+        operator approval. That violates the safety rule.
       </p>
 
-      <div className="mt-5 grid gap-4 md:grid-cols-2">
-        <div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.07] p-4">
-          <div className="text-xs uppercase tracking-wide text-amber-300">
-            Missing condition
-          </div>
-          <code className="mt-2 block break-words font-mono text-base text-amber-100">
-            {missingPredicate}
-          </code>
-        </div>
-        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/[0.05] p-4">
-          <div className="text-xs uppercase tracking-wide text-emerald-300">
-            Why this fixes it
-          </div>
-          <p className="mt-2 text-emerald-50">
-            Adding this guard makes{" "}
-            <span className="font-mono">Actuate</span> unreachable unless the
-            operator has explicitly approved.
-          </p>
-        </div>
+      <div className="mt-3 rounded border border-line bg-ink-50 px-3 py-2 font-mono text-[12.5px] text-ink-800">
+        missing: {missingPredicate}
       </div>
 
-      <Disclosure label="transition details">
+      <Disclosure label="transition guards">
         <div className="grid gap-2">
-          <pre className="overflow-x-auto rounded border border-ink-800 bg-ink-950 p-3 font-mono text-[12px] leading-5 text-ink-100">
-{`safe guard:      ${safeGuard}`}
+          <pre className="overflow-x-auto rounded border border-line bg-paper p-3 font-mono text-[12px] leading-5 text-ink-800">
+{`safe:      ${safeGuard}`}
           </pre>
-          <pre className="overflow-x-auto rounded border border-ink-800 bg-ink-950 p-3 font-mono text-[12px] leading-5 text-ink-100">
-{`regressed guard: ${newGuard}`}
+          <pre className="overflow-x-auto rounded border border-line bg-paper p-3 font-mono text-[12px] leading-5 text-ink-800">
+{`regressed: ${newGuard}`}
           </pre>
         </div>
       </Disclosure>
-    </div>
+    </section>
   );
 }

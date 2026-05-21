@@ -1,8 +1,9 @@
 "use client";
 
 import clsx from "clsx";
-import { CheckCircle2, Circle, Cpu, Loader2, Play, XCircle } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import type { PropertySpec, VerificationResult } from "../lib/types";
+import { SectionHeader } from "./MissionRuleCard";
 
 interface Props {
   bound: number;
@@ -23,50 +24,38 @@ export function GuaranteeCheckPanel({
   if (results) for (const r of results) byName.set(r.property, r);
 
   return (
-    <div className="rounded-2xl border border-ink-800 bg-ink-900/60 p-6 shadow-card">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-ink-400">
-            <Cpu className="h-4 w-4 text-accent" />
-            Step 3 · Verify
-          </div>
-          <h2 className="mt-2 text-2xl font-semibold text-ink-50">
-            Check mission guarantees
-          </h2>
-          <p className="mt-2 text-ink-300">
-            The verifier asks: under the current model, can we reach any state
-            that violates one of the mission rules?
-          </p>
-        </div>
+    <section>
+      <SectionHeader step="03" label="Check this change" />
+
+      <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-2xl text-[14px] text-ink-600">
+          Ask the checker: under the patched model, can we reach any state
+          that violates one of the safety rules?
+        </p>
         <button
           type="button"
           onClick={onRun}
           disabled={isRunning}
           className={clsx(
-            "inline-flex items-center gap-2 rounded-md bg-accent px-5 py-2.5 text-sm font-semibold text-white shadow-card transition hover:bg-accent-dark disabled:cursor-wait disabled:opacity-70"
+            "inline-flex items-center gap-2 rounded-md border border-accent bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white shadow-sm transition hover:bg-accent-dark disabled:cursor-wait disabled:opacity-70"
           )}
         >
-          {isRunning ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Play className="h-4 w-4" />
-          )}
-          {isRunning ? "Checking…" : "Check mission guarantees"}
+          {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          {isRunning ? "Checking…" : "Check this change"}
         </button>
       </div>
 
-      <ul className="mt-5 space-y-2">
+      <ul className="mt-4 divide-y divide-line rounded border border-line bg-paper">
         {properties.map((p) => {
           const r = byName.get(p.name);
           return <Row key={p.name} prop={p} result={r} />;
         })}
       </ul>
 
-      <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-ink-800 bg-ink-950/50 px-3 py-1 font-mono text-[11px] uppercase tracking-wide text-ink-400">
-        <Cpu className="h-3 w-3" />
-        Z3 bounded model checker · bound = {bound}
-      </div>
-    </div>
+      <p className="mt-3 text-[12px] text-ink-400">
+        Z3 bounded model checking · bound = {bound} transitions
+      </p>
+    </section>
   );
 }
 
@@ -79,57 +68,76 @@ function Row({
 }) {
   const status = result?.status ?? "unchecked";
   return (
-    <li
-      className={clsx(
-        "flex items-center justify-between gap-3 rounded-lg border px-4 py-3 transition",
-        status === "pass" && "border-emerald-500/40 bg-emerald-500/[0.05]",
-        status === "fail" && "border-rose-500/40 bg-rose-500/[0.06]",
-        status === "unchecked" && "border-ink-800 bg-ink-950/40"
-      )}
-    >
-      <div className="flex items-center gap-3 min-w-0">
-        <StatusIcon status={status} />
+    <li className="flex items-center justify-between gap-4 px-4 py-2.5">
+      <div className="flex min-w-0 items-center gap-3">
+        <StatusGlyph status={status} />
         <div className="min-w-0">
-          <div className="truncate font-medium text-ink-50">
-            {prop.title || prop.name}
+          <div className="truncate text-[14px] text-ink-900">
+            {humanizeTitle(prop.title || prop.name)}
           </div>
-          <div className="truncate text-xs text-ink-400">{prop.description}</div>
         </div>
       </div>
-      <div className="flex items-center gap-3 text-[11px] uppercase tracking-wide">
+      <div className="flex items-center gap-3 font-mono text-[11px] text-ink-400">
         {result?.elapsed_ms !== undefined && result.elapsed_ms !== null && (
-          <span className="font-mono text-ink-500">
-            {result.elapsed_ms.toFixed(0)}ms
-          </span>
+          <span>{result.elapsed_ms.toFixed(0)}ms</span>
         )}
-        <StatusBadge status={status} />
+        <StatusText status={status} />
       </div>
     </li>
   );
 }
 
-function StatusIcon({ status }: { status: "pass" | "fail" | "unchecked" }) {
-  if (status === "pass")
-    return <CheckCircle2 className="h-5 w-5 flex-none text-emerald-400" />;
-  if (status === "fail")
-    return <XCircle className="h-5 w-5 flex-none text-rose-400" />;
-  return <Circle className="h-5 w-5 flex-none text-ink-600" />;
+function StatusGlyph({ status }: { status: "pass" | "fail" | "unchecked" }) {
+  if (status === "pass") {
+    return (
+      <span
+        aria-hidden
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-50 text-[10px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200"
+      >
+        ✓
+      </span>
+    );
+  }
+  if (status === "fail") {
+    return (
+      <span
+        aria-hidden
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-red-50 text-[10px] font-semibold text-red-700 ring-1 ring-inset ring-red-200"
+      >
+        ✕
+      </span>
+    );
+  }
+  return (
+    <span
+      aria-hidden
+      className="inline-block h-3 w-3 rounded-full border border-ink-300 bg-paper"
+    />
+  );
 }
 
-function StatusBadge({ status }: { status: "pass" | "fail" | "unchecked" }) {
-  if (status === "pass")
-    return (
-      <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 font-medium text-emerald-300">
-        passed
-      </span>
-    );
-  if (status === "fail")
-    return (
-      <span className="rounded-full bg-rose-500/15 px-2 py-0.5 font-medium text-rose-300">
-        failed
-      </span>
-    );
-  return (
-    <span className="rounded-full bg-ink-800 px-2 py-0.5 text-ink-400">unchecked</span>
-  );
+function StatusText({ status }: { status: "pass" | "fail" | "unchecked" }) {
+  if (status === "pass") return <span className="text-emerald-700">passed</span>;
+  if (status === "fail") return <span className="text-red-700">failed</span>;
+  return <span className="text-ink-400">unchecked</span>;
+}
+
+/**
+ * Reword the engineering titles into the labels we use in the checklist.
+ */
+function humanizeTitle(t: string): string {
+  switch (t) {
+    case "Human Oversight":
+      return "Human approval before actuation";
+    case "Sensor Safety":
+      return "Sensor agreement before actuation";
+    case "Low Battery Recovery":
+      return "Low battery reaches recovery";
+    case "Armed Before Mission":
+      return "Mission requires arming";
+    case "GPS Safety":
+      return "GPS required for mission";
+    default:
+      return t;
+  }
 }

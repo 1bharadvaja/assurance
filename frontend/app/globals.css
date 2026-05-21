@@ -3,65 +3,65 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 html,
 body {
-  background: #070b12;
-  color: #eef0f4;
+  background: #fbfbfd;
+  color: #1a1f29;
 }
 
-/* React Flow tweaks for dark theme */
-.react-flow__node-default {
-  background: #1a1f29 !important;
-  color: #eef0f4 !important;
-  border: 1px solid #2c333f !important;
-  border-radius: 10px !important;
-  font-family: -apple-system, BlinkMacSystemFont, Inter, sans-serif !important;
-  font-size: 13px !important;
-  padding: 10px 14px !important;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+body {
+  font-feature-settings: "ss01", "cv11";
 }
-.react-flow__node.selected .react-flow__node-default,
-.react-flow__node.selected {
-  outline: 1px solid #3b82f6;
+
+/* React Flow tweaks for the light theme. */
+.react-flow__node-default {
+  background: #ffffff !important;
+  color: #1a1f29 !important;
+  border: 1px solid #d8dde6 !important;
+  border-radius: 6px !important;
+  font-family: -apple-system, BlinkMacSystemFont, Inter, sans-serif !important;
+  font-size: 12px !important;
+  padding: 6px 12px !important;
+  box-shadow: none !important;
 }
 .react-flow__edge-text {
-  fill: #bcc4d3 !important;
-  font-size: 11px !important;
+  fill: #5b6473 !important;
+  font-size: 10.5px !important;
   font-family: "JetBrains Mono", ui-monospace, monospace !important;
 }
 .react-flow__edge-textbg {
-  fill: #070b12 !important;
+  fill: #fbfbfd !important;
+}
+.react-flow__controls {
+  box-shadow: none !important;
 }
 .react-flow__controls button {
-  background: #1a1f29 !important;
-  color: #eef0f4 !important;
-  border-bottom: 1px solid #2c333f !important;
+  background: #ffffff !important;
+  color: #3f4754 !important;
+  border-bottom: 1px solid #e4e7ec !important;
 }
 .react-flow__attribution {
   background: transparent !important;
-  color: #5f6878 !important;
 }
-
-/* Hide React Flow attribution background but keep link visible (license) */
 .react-flow__attribution a {
-  color: #5f6878 !important;
+  color: #94a0b4 !important;
 }
 
-/* scrollbar */
+/* Scrollbar — narrow, neutral. */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #070b12;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2c333f;
-  border-radius: 8px;
+  background: #d8dde6;
+  border-radius: 6px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #414957;
+  background: #b8c0cd;
 }

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssuranceReport } from "../components/AssuranceReport";
 import { CounterexampleReplay } from "../components/CounterexampleReplay";
 import { GuaranteeCheckPanel } from "../components/GuaranteeCheckPanel";
-import { MissionRuleCard } from "../components/MissionRuleCard";
+import { MissionRuleCard, SectionHeader } from "../components/MissionRuleCard";
 import { OneLineDiffCard } from "../components/OneLineDiffCard";
 import { RawTraceDisclosure } from "../components/RawTraceDisclosure";
 import { RestoreGuardPanel } from "../components/RestoreGuardPanel";
@@ -23,7 +23,6 @@ import { getScenario } from "../lib/api";
 import type {
   AssuranceDiffResponse,
   ModelSpec,
-  PropertySpec,
   RegressionEntry,
   RepairSpec,
   ScenarioBundle,
@@ -35,6 +34,7 @@ const SCENARIO_ID = "mission-controller";
 const BOUND = 10;
 const KEY_TRANSITION = "authorized_actuation";
 const HEADLINE_PROPERTY = "no_actuate_without_authority";
+const HEADLINE_LABEL = "Human approval before actuation";
 
 export default function Page() {
   const [scenario, setScenario] = useState<ScenarioBundle | null>(null);
@@ -45,10 +45,6 @@ export default function Page() {
 
   const [verifyResult, setVerifyResult] = useState<VerifyResponse | null>(null);
   const [diff, setDiff] = useState<AssuranceDiffResponse | null>(null);
-  // Sticky snapshot of the regression we are investigating. We keep it
-  // around after the repair is applied so the investigate + success cards
-  // can stay visible together, instead of disappearing the moment the
-  // re-verification reports zero regressions.
   const [investigatedRegression, setInvestigatedRegression] =
     useState<RegressionEntry | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -94,7 +90,6 @@ export default function Page() {
     };
   }, []);
 
-  // Swap active model when the regression toggle changes (and reset state).
   useEffect(() => {
     if (!scenario) return;
     setActiveModel(regressionOn ? scenario.regressed_model : scenario.safe_model);
@@ -117,16 +112,10 @@ export default function Page() {
     return preferred ?? diff.regressions[0];
   }, [diff]);
 
-  // After a successful repair we want to keep the investigate cards visible
-  // (so the user can still see what was broken) AND show the success card.
-  // `regressionEntry` therefore prefers the sticky snapshot we took at
-  // investigation time.
   const regressionEntry: RegressionEntry | null =
     investigatedRegression ?? liveRegression;
 
-  const headlineResult = resultsByName.get(HEADLINE_PROPERTY);
   const headlineProp = scenario?.properties.find((p) => p.name === HEADLINE_PROPERTY);
-  const headlineTitle = headlineProp?.title || headlineProp?.name || "Human Oversight";
 
   const safeTransition = useMemo(
     () => scenario?.safe_model.transitions.find((t) => t.name === KEY_TRANSITION),
@@ -178,8 +167,6 @@ export default function Page() {
         failed: response.results.filter((r) => r.status === "fail").length,
       };
       setVerifyResult({ results: response.results, summary });
-      // First time we see a regression on this model, snapshot it so the
-      // investigate section stays visible after the repair lands.
       if (!investigatedRegression && response.regressions.length > 0) {
         const preferred =
           response.regressions.find((r) => r.property === HEADLINE_PROPERTY) ??
@@ -202,8 +189,6 @@ export default function Page() {
       const repairToApply = regressionEntry.suggested_repair;
       const { model } = await applyRepairApi(activeModel, repairToApply);
       setActiveModel(model);
-      // Re-verify FIRST so that, by the time the success card appears, the
-      // verifier has already reported zero regressions.
       await runVerification(model);
       setAppliedRepair(repairToApply);
       setCurrentStep(5);
@@ -217,12 +202,12 @@ export default function Page() {
 
   if (scenarioError) {
     return (
-      <main className="mx-auto max-w-3xl px-6 py-24">
-        <h1 className="text-3xl font-semibold">Assurance Studio</h1>
-        <div className="mt-6 rounded-md border border-rose-500/40 bg-rose-500/[0.08] p-4 text-rose-200">
+      <main className="mx-auto max-w-2xl px-6 py-16">
+        <h1 className="text-2xl font-semibold text-ink-900">Assurance Studio</h1>
+        <div className="mt-6 rounded border border-red-200 bg-red-50 p-4 text-[14px] text-red-900">
           <p className="font-semibold">Cannot reach the verification backend.</p>
-          <p className="mt-1 text-sm">{scenarioError}</p>
-          <pre className="mt-3 rounded bg-ink-950 p-3 font-mono text-xs">
+          <p className="mt-1">{scenarioError}</p>
+          <pre className="mt-3 rounded border border-line bg-paper p-3 font-mono text-[12px] text-ink-800">
 {`cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -244,20 +229,21 @@ uvicorn app.main:app --reload --port 8000`}
         onSelect={scrollToStep}
       />
 
-      <div className="mx-auto max-w-5xl px-6">
-        <div className="space-y-12 pt-10">
-          <section ref={stepRefs[1]} className="scroll-mt-20">
+      <div className="mx-auto max-w-4xl px-6">
+        <div className="space-y-14 pt-10">
+          <section ref={stepRefs[1]} className="scroll-mt-16">
             {scenario && headlineProp?.condition && (
               <MissionRuleCard formalProperty={headlineProp.condition} />
             )}
           </section>
 
-          <section ref={stepRefs[2]} className="scroll-mt-20">
+          <section ref={stepRefs[2]} className="scroll-mt-16">
             {scenario && safeTransition && regressedTransition && activeTransition && (
               <OneLineDiffCard
                 transitionName={KEY_TRANSITION}
                 safeGuard={safeTransition.guard}
-                regressedGuard={activeTransition.guard}
+                regressedGuard={regressedTransition.guard}
+                activeGuard={activeTransition.guard}
                 changeActive={regressionOn}
                 repaired={appliedRepair !== null}
                 onToggle={(next) => {
@@ -271,7 +257,7 @@ uvicorn app.main:app --reload --port 8000`}
             )}
           </section>
 
-          <section ref={stepRefs[3]} className="scroll-mt-20 space-y-6">
+          <section ref={stepRefs[3]} className="scroll-mt-16 space-y-4">
             {scenario && activeModel && (
               <GuaranteeCheckPanel
                 bound={BOUND}
@@ -282,7 +268,7 @@ uvicorn app.main:app --reload --port 8000`}
               />
             )}
             {errorMessage && (
-              <div className="rounded-md border border-rose-500/40 bg-rose-500/[0.07] p-3 text-sm text-rose-200">
+              <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-900">
                 {errorMessage}
               </div>
             )}
@@ -292,60 +278,29 @@ uvicorn app.main:app --reload --port 8000`}
                 passed={verifyResult.summary.passed}
                 failed={verifyResult.summary.failed}
                 failingTitle={
-                  regressionEntry
-                    ? scenario?.properties.find((p) => p.name === regressionEntry.property)?.title ||
-                      regressionEntry.property
-                    : headlineTitle
+                  regressionEntry ? HEADLINE_LABEL : HEADLINE_LABEL
                 }
-                onContinue={
-                  regressionEntry
-                    ? () => scrollToStep(4)
-                    : appliedRepair
-                    ? undefined
-                    : undefined
-                }
-                continueLabel="See the unsafe path"
+                onContinue={regressionEntry ? () => scrollToStep(4) : undefined}
+                continueLabel="See the failing execution"
               />
             )}
           </section>
 
           {regressionEntry && (
-            <section ref={stepRefs[4]} className="scroll-mt-20 space-y-6">
-              <div className="rounded-2xl border border-ink-800 bg-ink-900/60 p-6 shadow-card">
-                <div className="text-xs uppercase tracking-widest text-ink-400">
-                  Step 4 · Investigate
-                </div>
-                <CounterexampleReplay
-                  trace={regressionEntry.counterexample}
-                  propertyTitle={
-                    scenario?.properties.find((p) => p.name === regressionEntry.property)
-                      ?.title || regressionEntry.property
-                  }
+            <section ref={stepRefs[4]} className="scroll-mt-16 space-y-6">
+              <SectionHeader step="04" label="Unsafe execution" />
+              <CounterexampleReplay
+                trace={regressionEntry.counterexample}
+                propertyTitle={HEADLINE_LABEL}
+              />
+              {scenario && (
+                <StateGraph
+                  nodes={scenario.graph.nodes}
+                  edges={scenario.graph.edges}
+                  counterexample={regressionEntry.counterexample}
+                  culpritName={regressionEntry.culprit_transition?.name ?? null}
                 />
-                <div className="mt-6">
-                  {scenario && (
-                    <StateGraph
-                      nodes={scenario.graph.nodes}
-                      edges={scenario.graph.edges}
-                      counterexample={regressionEntry.counterexample}
-                      culpritName={regressionEntry.culprit_transition?.name ?? null}
-                    />
-                  )}
-                </div>
-                {scenario && (
-                  <div className="mt-6">
-                    <RawTraceDisclosure
-                      trace={regressionEntry.counterexample}
-                      columns={Object.keys(scenario.safe_model.variables)}
-                      violationTime={
-                        headlineResult?.violation_time ??
-                        regressionEntry.counterexample.length - 1
-                      }
-                    />
-                  </div>
-                )}
-              </div>
-
+              )}
               {regressionEntry.culprit_transition && safeTransition && (
                 <RootCauseCard
                   transitionName={regressionEntry.culprit_transition.name}
@@ -356,20 +311,30 @@ uvicorn app.main:app --reload --port 8000`}
                   newGuard={regressionEntry.culprit_transition.guard}
                 />
               )}
+              {scenario && (
+                <RawTraceDisclosure
+                  trace={regressionEntry.counterexample}
+                  columns={Object.keys(scenario.safe_model.variables)}
+                  violationTime={
+                    resultsByName.get(regressionEntry.property)?.violation_time ??
+                    regressionEntry.counterexample.length - 1
+                  }
+                />
+              )}
             </section>
           )}
 
           {regressionEntry?.suggested_repair && (
-            <section ref={stepRefs[5]} className="scroll-mt-20 space-y-6">
+            <section ref={stepRefs[5]} className="scroll-mt-16 space-y-4">
               <RestoreGuardPanel
                 repair={regressionEntry.suggested_repair}
                 isApplying={isApplying}
                 applied={appliedRepair !== null}
                 onApply={onApplyRepair}
               />
-              {appliedRepair && headlineProp && (
+              {appliedRepair && (
                 <SuccessCard
-                  propertyTitle={headlineProp.title || headlineProp.name}
+                  propertyTitle={HEADLINE_LABEL}
                   beforeStatus="failed"
                   afterStatus="passed"
                   bound={BOUND}
@@ -379,18 +344,16 @@ uvicorn app.main:app --reload --port 8000`}
           )}
 
           {scenario && activeModel && (
-            <section>
-              <AssuranceReport
-                scenarioTitle={scenario.title}
-                modelTitle={activeModel.title || activeModel.name}
-                bound={BOUND}
-                properties={scenario.properties}
-                results={verifyResult}
-                diff={diff}
-                appliedRepair={appliedRepair}
-                activeModel={activeModel}
-              />
-            </section>
+            <AssuranceReport
+              scenarioTitle={scenario.title}
+              modelTitle={activeModel.title || activeModel.name}
+              bound={BOUND}
+              properties={scenario.properties}
+              results={verifyResult}
+              diff={diff}
+              appliedRepair={appliedRepair}
+              activeModel={activeModel}
+            />
           )}
         </div>
       </div>

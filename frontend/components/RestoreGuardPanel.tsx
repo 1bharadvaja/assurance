@@ -1,8 +1,9 @@
 "use client";
 
 import clsx from "clsx";
-import { CheckCircle2, Loader2, Wrench } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import type { RepairSpec } from "../lib/types";
+import { SectionHeader } from "./MissionRuleCard";
 
 interface Props {
   repair: RepairSpec;
@@ -13,56 +14,53 @@ interface Props {
 
 export function RestoreGuardPanel({ repair, isApplying, applied, onApply }: Props) {
   return (
-    <div className="rounded-2xl border border-amber-500/40 bg-amber-500/[0.07] p-6 shadow-card">
-      <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-amber-300">
-        <Wrench className="h-4 w-4" />
-        Step 5 · Restore the guard
-      </div>
-      <h3 className="mt-2 text-2xl font-semibold text-amber-50">
-        Restore human-authorization guard
-      </h3>
-      <p className="mt-2 max-w-2xl text-amber-100">
-        Re-introduce <code className="font-mono">{repair.add_predicate}</code> as
-        a precondition for <code className="font-mono">{repair.transition}</code>
-        , then re-run the verifier against the patched model.
+    <section>
+      <SectionHeader step="05" label="Fix" />
+
+      <p className="mt-3 max-w-2xl text-[14.5px] leading-relaxed text-ink-800">
+        Put <code className="font-mono text-ink-900">human_authorized == true</code>{" "}
+        back into the guard. This blocks the failing path because{" "}
+        <code className="font-mono text-ink-900">Actuate</code> is no longer
+        reachable from <code className="font-mono text-ink-900">DegradedComms</code>{" "}
+        unless operator approval is true.
       </p>
 
-      <div className="mt-5 rounded-md border border-ink-800 bg-ink-950 p-3">
-        <div className="text-xs uppercase tracking-wide text-ink-400">New guard</div>
-        <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[12.5px] leading-5 text-amber-50">
-          {repair.new_guard}
+      <div className="mt-3 overflow-hidden rounded border border-line bg-paper">
+        <div className="border-b border-line bg-ink-50 px-3 py-2 font-mono text-[12px] text-ink-500">
+          patch
+        </div>
+        <pre className="overflow-x-auto font-mono text-[13px] leading-6">
+          <div className="flex items-center gap-3 bg-diff-added px-3 text-emerald-800">
+            <span className="w-3 select-none text-ink-300">+</span>
+            <span>{repair.add_predicate}</span>
+          </div>
         </pre>
       </div>
 
-      <div className="mt-4 flex items-center justify-between">
-        <span className="text-xs text-amber-200/80">
-          The fix is targeted: it only re-introduces the missing predicate.
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <span className="text-[12px] text-ink-500">
+          Re-conjoins the missing predicate onto{" "}
+          <code className="font-mono text-ink-700">{repair.transition}.guard</code>.
         </span>
         <button
           type="button"
           onClick={onApply}
           disabled={isApplying || applied}
           className={clsx(
-            "inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-semibold transition",
+            "inline-flex items-center gap-2 rounded-md border px-3.5 py-1.5 text-[13px] font-medium transition",
             applied
-              ? "bg-emerald-600/85 text-white"
-              : "bg-amber-400 text-ink-950 hover:bg-amber-300 disabled:cursor-wait"
+              ? "border-emerald-700 bg-emerald-700 text-white"
+              : "border-accent bg-accent text-white hover:bg-accent-dark disabled:cursor-wait"
           )}
         >
-          {isApplying ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : applied ? (
-            <CheckCircle2 className="h-4 w-4" />
-          ) : (
-            <Wrench className="h-4 w-4" />
-          )}
+          {isApplying && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           {applied
-            ? "Applied and re-verified"
+            ? "Guard restored"
             : isApplying
-            ? "Re-running verification…"
-            : "Restore human-authorization guard"}
+            ? "Restoring & re-checking…"
+            : "Restore guard and check again"}
         </button>
       </div>
-    </div>
+    </section>
   );
 }

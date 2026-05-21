@@ -1,8 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { AlertOctagon, ArrowDown, ChevronRight } from "lucide-react";
-import { buildReplay } from "../lib/narrative";
+import { buildReplay, type ReplayStep } from "../lib/narrative";
 import type { TraceStep } from "../lib/types";
 
 interface Props {
@@ -14,27 +13,16 @@ export function CounterexampleReplay({ trace, propertyTitle }: Props) {
   const replay = buildReplay(trace);
   return (
     <div>
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold text-ink-50">
-          Unsafe execution found
+      <div className="flex items-baseline justify-between border-b border-line pb-2">
+        <h3 className="text-[15px] font-semibold tracking-tight text-ink-900">
+          Path the checker found
         </h3>
-        <span className="font-mono text-xs text-ink-400">{propertyTitle}</span>
+        <span className="font-mono text-[11px] text-ink-400">{propertyTitle}</span>
       </div>
-      <p className="mt-1 text-sm text-ink-300">
-        The verifier produced this reachable sequence ending in a state that
-        violates the mission rule.
-      </p>
 
-      <ol className="mt-5 space-y-3">
-        {replay.map((step, i) => (
-          <li key={step.index} className="relative">
-            <Card step={step} />
-            {i < replay.length - 1 && (
-              <div className="my-1 flex justify-center text-ink-700">
-                <ArrowDown className="h-4 w-4" />
-              </div>
-            )}
-          </li>
+      <ol className="mt-4 space-y-1.5">
+        {replay.map((step) => (
+          <Row key={step.index} step={step} />
         ))}
       </ol>
 
@@ -45,123 +33,83 @@ export function CounterexampleReplay({ trace, propertyTitle }: Props) {
   );
 }
 
-function Card({ step }: { step: ReturnType<typeof buildReplay>[number] }) {
+function Row({ step }: { step: ReplayStep }) {
   const isViolation = step.isViolation;
   return (
-    <div
+    <li
       className={clsx(
-        "flex items-start gap-4 rounded-xl border px-4 py-3.5 shadow-card",
+        "grid grid-cols-[28px_1fr_auto] items-center gap-3 rounded border px-3 py-2 text-[13px]",
         isViolation
-          ? "border-rose-500/60 bg-rose-500/[0.09]"
-          : "border-ink-800 bg-ink-900/60"
+          ? "border-red-200 bg-red-50/50"
+          : "border-line bg-paper"
       )}
     >
-      <div
+      <span
         className={clsx(
-          "flex h-8 w-8 flex-none items-center justify-center rounded-full text-sm font-semibold",
+          "flex h-5 w-5 items-center justify-center rounded font-mono text-[11px]",
           isViolation
-            ? "bg-rose-500 text-white"
-            : "bg-ink-800 text-ink-200"
+            ? "bg-red-700 text-white"
+            : "bg-ink-100 text-ink-500"
         )}
       >
         {step.index}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <div
-            className={clsx(
-              "text-base font-semibold",
-              isViolation ? "text-rose-50" : "text-ink-50"
-            )}
-          >
-            {step.title}
-          </div>
-          {step.transition && (
-            <div className="font-mono text-[11px] uppercase tracking-wide text-ink-500">
-              <ChevronRight className="-mt-0.5 mr-0.5 inline h-3 w-3" />
-              {step.transition}
-            </div>
-          )}
-        </div>
-        <p
+      </span>
+      <div className="min-w-0">
+        <div
           className={clsx(
-            "mt-1 text-sm",
-            isViolation ? "text-rose-100" : "text-ink-300"
+            "truncate",
+            isViolation ? "font-medium text-red-900" : "text-ink-900"
           )}
         >
-          {step.narrative}
-        </p>
-        <div className="mt-2 flex flex-wrap gap-1.5 font-mono text-[11px]">
-          <StatePill label="mode" value={step.mode} highlight={isViolation && step.mode === "Actuate"} />
-          <StatePill
-            label="comms"
-            value={step.comms}
-            highlight={step.comms === "Lost"}
-          />
-          <StatePill
-            label="human_authorized"
-            value={step.human_authorized ? "true" : "false"}
-            highlight={isViolation && !step.human_authorized}
-          />
+          {step.title}
+          <span className="ml-2 text-ink-400">{step.narrative}</span>
         </div>
       </div>
-    </div>
+      <div className="flex items-center gap-1.5 font-mono text-[11px] text-ink-500">
+        <Pill label={step.mode} highlight={isViolation && step.mode === "Actuate"} />
+        <Pill
+          label={`comms=${step.comms}`}
+          highlight={step.comms === "Lost"}
+        />
+        <Pill
+          label={`human_authorized=${step.human_authorized ? "true" : "false"}`}
+          highlight={isViolation && !step.human_authorized}
+        />
+      </div>
+    </li>
   );
 }
 
-function StatePill({
-  label,
-  value,
-  highlight = false,
-}: {
-  label: string;
-  value: string;
-  highlight?: boolean;
-}) {
+function Pill({ label, highlight = false }: { label: string; highlight?: boolean }) {
   return (
     <span
       className={clsx(
-        "inline-flex items-center gap-1.5 rounded border px-2 py-0.5",
+        "rounded border px-1.5 py-0.5",
         highlight
-          ? "border-rose-500/40 bg-rose-500/[0.12] text-rose-100"
-          : "border-ink-700 bg-ink-950/70 text-ink-200"
+          ? "border-red-300 bg-red-100/50 text-red-800"
+          : "border-line bg-ink-50 text-ink-600"
       )}
     >
-      <span className="text-ink-500">{label}=</span>
-      <span>{value}</span>
+      {label}
     </span>
   );
 }
 
-function FinalCallout({ step }: { step: ReturnType<typeof buildReplay>[number] }) {
+function FinalCallout({ step }: { step: ReplayStep }) {
   return (
     <div
       role="region"
       aria-label="Violation summary"
-      className="mt-5 rounded-2xl border-2 border-rose-500/60 bg-rose-500/[0.10] p-5 shadow-card"
+      className="mt-4 rounded border border-red-200 bg-red-50/60 px-4 py-3"
     >
-      <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-rose-300">
-        <AlertOctagon className="h-4 w-4" />
-        Violation reached
+      <div className="text-[12px] font-semibold uppercase tracking-wider text-red-800">
+        Violation
       </div>
-      <div className="mt-2 font-mono text-base leading-relaxed text-rose-50">
-        <div>
-          mode = <span className="font-semibold">{step.mode}</span>
-        </div>
-        <div>
-          comms = <span className="font-semibold">{step.comms}</span>
-        </div>
-        <div>
-          human_authorized ={" "}
-          <span className="font-semibold">
-            {step.human_authorized ? "true" : "false"}
-          </span>
-        </div>
-      </div>
-      <p className="mt-3 text-sm text-rose-100">
-        The mission rule says actuation must never happen with comms lost and
-        no human approval — and yet this state is reachable.
-      </p>
+      <pre className="mt-2 font-mono text-[13.5px] leading-6 text-red-900">
+{`mode             = ${step.mode}
+comms            = ${step.comms}
+human_authorized = ${step.human_authorized ? "true" : "false"}`}
+      </pre>
     </div>
   );
 }

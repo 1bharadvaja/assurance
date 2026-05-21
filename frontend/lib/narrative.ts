@@ -3,8 +3,7 @@
 // The solver often interleaves transitions that don't matter for the story
 // (sensor_agree, sensor_disagree, gps_loss, stutter, etc.). The investigator
 // pane only needs the path beats that explain how the platform got from Idle
-// to the unsafe Actuate state — operator authorization, arming, comms loss,
-// mode changes — terminating in the violation.
+// to the unsafe Actuate state.
 
 import type { TraceStep } from "./types";
 
@@ -15,7 +14,7 @@ export interface ReplayStep {
   rawIndex: number;
   /** Short title shown in the card header. */
   title: string;
-  /** One-sentence narrative shown below the title. */
+  /** Optional short narrative shown below the title. */
   narrative: string;
   /** Display state snippet. */
   mode: string;
@@ -31,41 +30,41 @@ type NarrativeFn = (after: TraceStep) => { title: string; narrative: string };
 
 const NARRATIVE: Record<string, NarrativeFn> = {
   operator_authorize: () => ({
-    title: "Operator authorizes",
-    narrative: "A human operator grants authorization for the upcoming mission.",
+    title: "Operator approves",
+    narrative: "An operator grants authorization.",
   }),
   arm: () => ({
-    title: "Platform armed",
-    narrative: "With authorization in hand, the platform transitions from Idle to Armed.",
+    title: "Armed",
+    narrative: "Platform leaves Idle for Armed.",
   }),
   start_mission: () => ({
-    title: "Mission starts",
-    narrative: "GPS is good and battery is high. The platform enters Mission.",
+    title: "Mission begins",
+    narrative: "Platform enters Mission.",
   }),
   operator_revoke: () => ({
     title: "Authorization revoked",
-    narrative: "The operator's authorization is withdrawn.",
+    narrative: "Operator withdraws approval.",
   }),
   comms_loss: () => ({
-    title: "Communications drop",
-    narrative: "The platform loses contact with its operator mid-flight.",
+    title: "Lost comms",
+    narrative: "Platform loses contact with the operator.",
   }),
   comms_degrade: () => ({
-    title: "Degraded operation",
-    narrative: "The controller reactively shifts to DegradedComms.",
+    title: "Degraded comms",
+    narrative: "Controller drops to DegradedComms.",
   }),
   low_battery_recovery: () => ({
-    title: "Battery recovery",
-    narrative: "Battery is low — the controller reactively diverts to Recovery.",
+    title: "Battery low",
+    narrative: "Controller diverts to Recovery.",
   }),
   emergency_land: () => ({
-    title: "Emergency landing",
-    narrative: "The platform performs an emergency landing.",
+    title: "Emergency land",
+    narrative: "Controller lands.",
   }),
   authorized_actuation: () => ({
     title: "Unsafe actuation",
     narrative:
-      "The platform actuates while communications are lost and no human has authorized the command.",
+      "Controller enters Actuate with comms lost and no operator approval.",
   }),
 };
 
@@ -75,12 +74,11 @@ export function buildReplay(trace: TraceStep[]): ReplayStep[] {
   if (!trace || trace.length === 0) return [];
   const out: ReplayStep[] = [];
 
-  // Always emit the initial state.
   out.push({
     index: 1,
     rawIndex: 0,
-    title: "System idle",
-    narrative: "The platform is on the ground, awaiting an authorized arming command.",
+    title: "Idle",
+    narrative: "Platform is on the ground.",
     mode: trace[0].mode as string,
     comms: trace[0].comms as string,
     human_authorized: Boolean(trace[0].human_authorized),
@@ -88,13 +86,11 @@ export function buildReplay(trace: TraceStep[]): ReplayStep[] {
     isViolation: false,
   });
 
-  // Walk transitions in order; emit a beat for each meaningful one.
   for (let i = 0; i < trace.length - 1; i++) {
     const trans = trace[i].transition as string | undefined;
     if (!trans || !KEEP.has(trans)) continue;
     const after = trace[i + 1];
-    const fn = NARRATIVE[trans];
-    const n = fn(after);
+    const n = NARRATIVE[trans](after);
     const isViolation = trans === "authorized_actuation";
     out.push({
       index: out.length + 1,
@@ -133,11 +129,12 @@ export function pathEdges(
   return edges;
 }
 
-/** Split a top-level conjunctive guard string into its component clauses. */
+/**
+ * Split a top-level conjunctive guard string into its component clauses.
+ * Recursively flattens parenthesised conjunctions.
+ */
 export function splitConjuncts(guard: string): string[] {
-  // Naive top-level split on " and " — robust enough for our guards which use
-  // parentheses only inside individual clauses, not around the connectives.
-  const parts: string[] = [];
+  const raw: string[] = [];
   let depth = 0;
   let start = 0;
   const lower = guard.toLowerCase();
@@ -146,18 +143,23 @@ export function splitConjuncts(guard: string): string[] {
     if (c === "(") depth++;
     else if (c === ")") depth--;
     if (depth === 0) {
-      // Look for the literal " and " token starting at position i.
       if (i + 5 <= guard.length && lower.slice(i, i + 5) === " and ") {
-        parts.push(guard.slice(start, i).trim());
+        raw.push(guard.slice(start, i).trim());
         start = i + 5;
         i += 4;
       } else if (i === guard.length) {
-        parts.push(guard.slice(start, i).trim());
+        raw.push(guard.slice(start, i).trim());
       }
     }
   }
-  // Strip a single outer pair of parens around each part for cleaner display.
-  return parts
-    .filter((p) => p.length > 0)
-    .map((p) => (p.startsWith("(") && p.endsWith(")") ? p.slice(1, -1).trim() : p));
+  const out: string[] = [];
+  for (const p of raw) {
+    if (!p) continue;
+    if (p.startsWith("(") && p.endsWith(")")) {
+      out.push(...splitConjuncts(p.slice(1, -1).trim()));
+    } else {
+      out.push(p);
+    }
+  }
+  return out;
 }
