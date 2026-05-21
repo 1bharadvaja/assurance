@@ -41,3 +41,7 @@ pnpm-debug.log*
 
 # --- Claude Code session artifacts ---
 .claude/
+
+# Auto-generated canned API snapshots for the static demo (built in CI
+# via `python -m app.canned`).
+frontend/public/canned/
