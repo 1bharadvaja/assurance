@@ -4,7 +4,19 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+# ----- Public-facing limits --------------------------------------------------
+#
+# These exist mainly to keep the deployed backend's solver workload bounded.
+# They are intentionally generous — every bundled scenario is well inside them
+# — but tight enough that a hostile request can't pin the SMT solver.
+MAX_VARIABLES = 12
+MAX_ENUM_VALUES = 12
+MAX_TRANSITIONS = 40
+MAX_PROPERTIES = 20
+MAX_BOUND = 20
 
 
 class VariableSpec(BaseModel):
@@ -13,6 +25,16 @@ class VariableSpec(BaseModel):
     type: Literal["enum", "bool"]
     values: Optional[List[str]] = None
     initial: Union[str, bool]
+
+    @field_validator("values")
+    @classmethod
+    def _check_values_size(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is not None and len(v) > MAX_ENUM_VALUES:
+            raise ValueError(
+                f"Too many enum values ({len(v)}); the public demo allows at most "
+                f"{MAX_ENUM_VALUES} per variable."
+            )
+        return v
 
 
 class TransitionSpec(BaseModel):
@@ -32,6 +54,30 @@ class ModelSpec(BaseModel):
     description: Optional[str] = None
     variables: Dict[str, VariableSpec]
     transitions: List[TransitionSpec]
+
+    @field_validator("variables")
+    @classmethod
+    def _check_var_count(
+        cls, v: Dict[str, "VariableSpec"]
+    ) -> Dict[str, "VariableSpec"]:
+        if len(v) > MAX_VARIABLES:
+            raise ValueError(
+                f"Too many variables ({len(v)}); the public demo allows at most "
+                f"{MAX_VARIABLES}."
+            )
+        return v
+
+    @field_validator("transitions")
+    @classmethod
+    def _check_trans_count(
+        cls, v: List["TransitionSpec"]
+    ) -> List["TransitionSpec"]:
+        if len(v) > MAX_TRANSITIONS:
+            raise ValueError(
+                f"Too many transitions ({len(v)}); the public demo allows at most "
+                f"{MAX_TRANSITIONS}."
+            )
+        return v
 
 
 class PropertySpec(BaseModel):
@@ -57,22 +103,26 @@ class VerificationResult(BaseModel):
     property: str
     title: Optional[str] = None
     type: Literal["invariant", "bounded_response"]
-    status: Literal["pass", "fail"]
+    # ``timeout`` means the solver gave up before deciding. We do not silently
+    # fold it into pass or fail — the UI surfaces it as a distinct outcome.
+    status: Literal["pass", "fail", "timeout"]
     bound: int
     counterexample: Optional[List[Dict[str, Any]]] = None
     violation_time: Optional[int] = None
     elapsed_ms: Optional[float] = None
+    note: Optional[str] = None
 
 
 class VerifyRequest(BaseModel):
     model: ModelSpec
-    properties: List[PropertySpec]
-    bound: int = 8
+    properties: List[PropertySpec] = Field(..., max_length=MAX_PROPERTIES)
+    bound: int = Field(default=8, ge=1, le=MAX_BOUND)
 
 
 class VerifySummary(BaseModel):
     passed: int
     failed: int
+    timed_out: int = 0
 
 
 class VerifyResponse(BaseModel):
@@ -109,8 +159,8 @@ class DiffSummary(BaseModel):
 class AssuranceDiffRequest(BaseModel):
     old_model: ModelSpec
     new_model: ModelSpec
-    properties: List[PropertySpec]
-    bound: int = 8
+    properties: List[PropertySpec] = Field(..., max_length=MAX_PROPERTIES)
+    bound: int = Field(default=8, ge=1, le=MAX_BOUND)
 
 
 class AssuranceDiffResponse(BaseModel):

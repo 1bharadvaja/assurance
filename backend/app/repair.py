@@ -1,17 +1,42 @@
 """Targeted repair suggestions for failing properties.
 
-For the demo we implement a single, deterministic repair: strengthen the
-guard of a transition by conjoining a missing predicate. This is *not* a
-general program-repair engine — we surface it as a suggested fix only for
-the specific regression we know how to reason about.
+For the demo we implement one kind of repair — strengthen a transition's
+guard by conjoining a missing predicate. We only surface a suggestion when
+we have a hand-written template for the property in question; otherwise the
+caller should treat 'no repair available' as the honest answer rather than
+fabricating one.
 """
 
 from __future__ import annotations
 
-import copy
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 from .models import ModelSpec, PropertySpec, RepairSpec, TransitionSpec
+
+
+# Property name → (predicate to conjoin, human-readable rationale).
+_REPAIR_TEMPLATES: Dict[str, Tuple[str, str]] = {
+    "no_actuate_without_authority": (
+        "human_authorized == true",
+        "The invariant requires that the platform never reaches Actuate with "
+        "comms lost and no human approval. Adding the missing predicate to "
+        "the culprit guard restores the human-in-the-loop precondition.",
+    ),
+    "no_actuate_on_sensor_disagreement": (
+        "sensor_agreement == true",
+        "Require consistent sensor evidence before allowing actuation.",
+    ),
+    "gps_loss_prevents_mission_start": (
+        "gps == OK",
+        "Restore the GPS precondition so Mission cannot start without a "
+        "valid position fix.",
+    ),
+    "mission_requires_armed_history": (
+        "armed_before == true",
+        "Require the platform to have been armed at least once before "
+        "entering Mission.",
+    ),
+}
 
 
 def suggest_repair(
@@ -20,36 +45,17 @@ def suggest_repair(
 ) -> Optional[RepairSpec]:
     if culprit is None:
         return None
-
-    if prop.name == "no_actuate_without_authority":
-        return _strengthen_with(
-            culprit,
-            "human_authorized == true",
-            rationale=(
-                "The invariant requires that the platform never reaches Actuate "
-                "with communications lost and no human authorization. Adding "
-                "`human_authorized == true` to the actuation guard restores the "
-                "human-in-the-loop precondition that the regression removed."
-            ),
-        )
-
-    if prop.name == "no_actuate_on_sensor_disagreement":
-        return _strengthen_with(
-            culprit,
-            "sensor_agreement == true",
-            rationale=(
-                "Require consistent sensor evidence before allowing actuation."
-            ),
-        )
-
-    return None
+    template = _REPAIR_TEMPLATES.get(prop.name)
+    if template is None:
+        return None
+    predicate, rationale = template
+    return _strengthen_with(culprit, predicate, rationale=rationale)
 
 
 def _strengthen_with(
     culprit: TransitionSpec, predicate: str, rationale: str
 ) -> Optional[RepairSpec]:
     if predicate in culprit.guard:
-        # Predicate already present; nothing to suggest.
         return None
     new_guard = f"({culprit.guard}) and {predicate}"
     return RepairSpec(

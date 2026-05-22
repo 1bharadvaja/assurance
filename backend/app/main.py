@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import os
 from typing import List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 
 from .diff import diff_results
 from .examples import list_scenarios, load_scenario
+from .guards import GuardSyntaxError
 from .models import (
+    MAX_BOUND,
+    MAX_PROPERTIES,
+    MAX_TRANSITIONS,
     ApplyRepairRequest,
     ApplyRepairResponse,
     AssuranceDiffRequest,
@@ -18,28 +24,46 @@ from .models import (
     VerifyResponse,
     VerifySummary,
 )
+from .parser import validate_model
 from .repair import apply_repair
 from .verifier import Verifier
 
 
+def _cors_origins() -> list[str]:
+    raw = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
 app = FastAPI(
     title="Assurance Studio",
-    version="0.1.0",
-    description="Bounded model checking for mission-critical autonomy.",
+    version="0.2.0",
+    description=(
+        "Bounded model checking for mission-critical autonomy. "
+        "This service is intentionally small: it verifies finite "
+        "state-machine models against invariant and bounded-response "
+        "properties using Z3."
+    ),
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "limits": {
+            "max_transitions": MAX_TRANSITIONS,
+            "max_properties": MAX_PROPERTIES,
+            "max_bound": MAX_BOUND,
+        },
+    }
 
 
 @app.get("/api/scenarios")
@@ -55,19 +79,36 @@ def get_scenario(scenario_id: str):
     return data
 
 
+def _validate_or_raise(req_model) -> None:
+    """Run our structural validators on the model payload and translate
+    parser / guard errors into HTTP 400s instead of 500s."""
+    try:
+        validate_model(req_model)
+    except GuardSyntaxError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid guard: {exc}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValidationError as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/verify", response_model=VerifyResponse)
 def verify(req: VerifyRequest):
+    _validate_or_raise(req.model)
     v = Verifier(req.model)
     results = [v.check_property(p, req.bound) for p in req.properties]
     summary = VerifySummary(
         passed=sum(1 for r in results if r.status == "pass"),
         failed=sum(1 for r in results if r.status == "fail"),
+        timed_out=sum(1 for r in results if r.status == "timeout"),
     )
     return VerifyResponse(results=results, summary=summary)
 
 
 @app.post("/api/assurance-diff", response_model=AssuranceDiffResponse)
 def assurance_diff(req: AssuranceDiffRequest):
+    _validate_or_raise(req.old_model)
+    _validate_or_raise(req.new_model)
     old_v = Verifier(req.old_model)
     new_v = Verifier(req.new_model)
     old_results = [old_v.check_property(p, req.bound) for p in req.properties]
@@ -82,5 +123,7 @@ def assurance_diff(req: AssuranceDiffRequest):
 
 @app.post("/api/apply-repair", response_model=ApplyRepairResponse)
 def apply_repair_endpoint(req: ApplyRepairRequest):
+    _validate_or_raise(req.model)
     new_model = apply_repair(req.model, req.repair)
+    _validate_or_raise(new_model)
     return ApplyRepairResponse(model=new_model)

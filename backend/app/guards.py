@@ -86,6 +86,13 @@ def evaluate(tree: ast.AST, state: Mapping[str, Any]) -> bool:
     """Evaluate a parsed guard against a concrete state dict."""
     if isinstance(tree, ast.Expression):
         return evaluate(tree.body, state)
+    # Standalone bool keywords / bool literals — useful when the playground
+    # ends up with an empty conjunction it wants to flatten to `true`, or a
+    # disabled transition we'd express as `false`.
+    if isinstance(tree, ast.Name) and tree.id in _BOOL_KEYWORDS:
+        return _BOOL_KEYWORDS[tree.id]
+    if isinstance(tree, ast.Constant) and isinstance(tree.value, bool):
+        return tree.value
     if isinstance(tree, ast.BoolOp):
         if isinstance(tree.op, ast.And):
             return all(evaluate(v, state) for v in tree.values)
@@ -120,6 +127,9 @@ def _eval_term(node: ast.AST, state: Mapping[str, Any]) -> Any:
     if isinstance(node, ast.Constant) and isinstance(node.value, bool):
         return node.value
     raise GuardSyntaxError(f"Unexpected term: {ast.dump(node)}")
+
+
+# Keep this re-export usable from `from .guards import bool_keyword_value`.
 
 
 def is_bool_keyword(name: str) -> bool:

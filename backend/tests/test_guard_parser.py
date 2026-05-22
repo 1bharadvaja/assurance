@@ -64,3 +64,12 @@ def test_rejects_string_literals():
 def test_rejects_empty_string():
     with pytest.raises(GuardSyntaxError):
         parse_guard("")
+
+
+def test_standalone_bool_keyword():
+    """The playground reduces empty conjunctions to the literal `true`."""
+    assert _eval("true", {}) is True
+    assert _eval("false", {}) is False
+    assert _eval("not false", {}) is True
+    assert _eval("true or false", {}) is True
+    assert _eval("(true) and mode == Idle", {"mode": "Idle"}) is True

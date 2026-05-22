@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast as _ast
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -11,6 +12,27 @@ import z3
 
 from .guards import bool_keyword_value, is_bool_keyword, parse_guard
 from .models import ModelSpec, PropertySpec, VerificationResult
+
+
+def _solver_timeout_ms() -> int:
+    """Per-query Z3 timeout in ms.
+
+    Configurable via ``ASSURANCE_SOLVER_TIMEOUT_MS`` so deployments can
+    tune it. Defaults to 5s which is comfortably above the time the
+    bundled scenarios take and short enough to keep a public endpoint
+    responsive.
+    """
+    raw = os.getenv("ASSURANCE_SOLVER_TIMEOUT_MS", "5000")
+    try:
+        return max(500, int(raw))
+    except ValueError:
+        return 5000
+
+
+def _new_solver() -> z3.Solver:
+    s = z3.Solver()
+    s.set("timeout", _solver_timeout_ms())
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +56,10 @@ class _Z3Env:
 def _node_to_z3(node: _ast.AST, env: _Z3Env) -> z3.ExprRef:
     if isinstance(node, _ast.Expression):
         return _node_to_z3(node.body, env)
+    if isinstance(node, _ast.Name) and is_bool_keyword(node.id):
+        return z3.BoolVal(bool_keyword_value(node.id))
+    if isinstance(node, _ast.Constant) and isinstance(node.value, bool):
+        return z3.BoolVal(node.value)
     if isinstance(node, _ast.BoolOp):
         parts = [_node_to_z3(v, env) for v in node.values]
         if isinstance(node.op, _ast.And):
@@ -268,7 +294,7 @@ class Verifier:
         start = time.perf_counter()
         sorts, vars_by_t, trans_choices = self._make_sorts_and_vars(bound)
 
-        solver = z3.Solver()
+        solver = _new_solver()
         for c in self._initial_constraints(sorts, vars_by_t[0]):
             solver.add(c)
         for t in range(bound):
@@ -305,15 +331,26 @@ class Verifier:
                 violation_time=first_t,
                 elapsed_ms=elapsed,
             )
+        if result == z3.unsat:
+            return VerificationResult(
+                property=prop.name,
+                title=prop.title,
+                type=prop.type,
+                status="pass",
+                bound=bound,
+                counterexample=None,
+                violation_time=None,
+                elapsed_ms=elapsed,
+            )
+        # unknown — solver hit its timeout. Be honest about it.
         return VerificationResult(
             property=prop.name,
             title=prop.title,
             type=prop.type,
-            status="pass",
+            status="timeout",
             bound=bound,
-            counterexample=None,
-            violation_time=None,
             elapsed_ms=elapsed,
+            note=f"Solver timed out after {elapsed:.0f} ms (no decision).",
         )
 
     def _first_violation_time(
@@ -342,7 +379,7 @@ class Verifier:
         start = time.perf_counter()
         sorts, vars_by_t, trans_choices = self._make_sorts_and_vars(bound)
 
-        solver = z3.Solver()
+        solver = _new_solver()
         for c in self._initial_constraints(sorts, vars_by_t[0]):
             solver.add(c)
         for t in range(bound):
@@ -385,6 +422,16 @@ class Verifier:
         solver.add(z3.Or(*violation_disj))
         result = solver.check()
         elapsed = (time.perf_counter() - start) * 1000.0
+        if result == z3.unknown:
+            return VerificationResult(
+                property=prop.name,
+                title=prop.title,
+                type=prop.type,
+                status="timeout",
+                bound=bound,
+                elapsed_ms=elapsed,
+                note=f"Solver timed out after {elapsed:.0f} ms (no decision).",
+            )
         if result == z3.sat:
             model = solver.model()
             first_t0 = bound

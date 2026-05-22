@@ -48,16 +48,18 @@ export interface VerificationResult {
   property: string;
   title?: string | null;
   type: PropertyType;
-  status: "pass" | "fail";
+  status: "pass" | "fail" | "timeout";
   bound: number;
   counterexample?: TraceStep[] | null;
   violation_time?: number | null;
   elapsed_ms?: number | null;
+  note?: string | null;
 }
 
 export interface VerifySummary {
   passed: number;
   failed: number;
+  timed_out?: number;
 }
 
 export interface VerifyResponse {
