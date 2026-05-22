@@ -197,6 +197,17 @@ export function Playground() {
         )}
       </header>
 
+      {/* Gate the rest of the UI on scenario being loaded so a click on a
+          preset can never race the initial fetch (onPreset would bail out
+          early if scenario was still null, silently dropping the click). */}
+      {!scenario && (
+        <div className="rounded border border-line bg-ink-50 px-4 py-8 text-center text-[13px] text-ink-500">
+          Loading scenario from the backend…
+        </div>
+      )}
+
+      {scenario && (
+        <>
       <PresetRow onApply={onPreset} activeId={activePreset} />
 
       <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end">
@@ -297,6 +308,8 @@ export function Playground() {
             </p>
           )}
         </Disclosure>
+      )}
+        </>
       )}
     </div>
   );
