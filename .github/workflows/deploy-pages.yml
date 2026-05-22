@@ -31,6 +31,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # The canned responses are no longer the source of truth (we hit the
+      # live backend), but we keep generating them so anyone running
+      # `STATIC_EXPORT=1 NEXT_PUBLIC_DEMO_MODE=true npm run build` locally
+      # gets a working offline build.
       - name: Generate canned verifier responses
         working-directory: backend
         run: python -m app.canned ../frontend/public/canned
@@ -50,7 +54,11 @@ jobs:
         working-directory: frontend
         env:
           STATIC_EXPORT: "1"
-          NEXT_PUBLIC_DEMO_MODE: "true"
+          # Live verifier mode: the static export calls the FastAPI backend
+          # hosted on Hugging Face Spaces. Override with a repo variable
+          # (Settings -> Secrets and variables -> Actions -> Variables) named
+          # ASSURANCE_API_BASE if the backend ever moves.
+          NEXT_PUBLIC_API_BASE: ${{ vars.ASSURANCE_API_BASE || 'https://bharadwaj117-assurance-studio-api.hf.space' }}
           NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
           NEXT_TELEMETRY_DISABLED: "1"
         run: |
