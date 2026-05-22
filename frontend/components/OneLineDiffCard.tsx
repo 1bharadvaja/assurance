@@ -79,6 +79,24 @@ export function OneLineDiffCard({
         local diff.
       </p>
 
+      <div className="mt-4 max-w-2xl rounded border border-line bg-ink-50 px-4 py-3 text-[13.5px] leading-relaxed text-ink-700">
+        <div className="text-[11px] font-medium uppercase tracking-wider text-ink-500">
+          Why this might look like a clean change
+        </div>
+        <p className="mt-2">
+          The controller already checks{" "}
+          <code className="font-mono text-ink-900">human_authorized</code>{" "}
+          when the operator arms the platform and again when the mission
+          starts. By the time it reaches{" "}
+          <code className="font-mono text-ink-900">DegradedComms</code>, that
+          flag hasn&apos;t been touched in a while — and comms are gone, so
+          there is no way for the operator to refresh it now. Sensor agreement
+          is the live safety signal. From the developer&apos;s seat, dropping
+          the re-check inside this guard looks like trimming a redundant
+          condition.
+        </p>
+      </div>
+
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
         <ApplyToggle on={changeActive} disabled={repaired} onChange={onToggle} />
         <span className="text-[12px] text-ink-500">
