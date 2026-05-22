@@ -65,12 +65,21 @@ export function Playground() {
   // Whenever the user switches transitions in the picker, make sure we
   // have an edit entry for it so the editor has something to render
   // (initialised to the safe baseline guard).
+  //
+  // The guard is inside the functional updater so we read the LATEST
+  // edits — otherwise the closure captures a stale `edits` and we can
+  // overwrite a freshly-applied preset. (Strict-mode double-invocation
+  // in dev masked this: the second pass had the updated closure, so dev
+  // builds happened to work.)
   useEffect(() => {
-    if (!scenario || edits[selected]) return;
-    const t = scenario.safe_model.transitions.find((x) => x.name === selected);
-    if (!t) return;
-    setEdits((cur) => ({ ...cur, [selected]: buildEditFromTransition(t) }));
-  }, [scenario, selected, edits]);
+    if (!scenario) return;
+    setEdits((cur) => {
+      if (cur[selected]) return cur;
+      const t = scenario.safe_model.transitions.find((x) => x.name === selected);
+      if (!t) return cur;
+      return { ...cur, [selected]: buildEditFromTransition(t) };
+    });
+  }, [scenario, selected]);
 
   const editedModel: ModelSpec | null = useMemo(() => {
     if (!scenario) return null;
