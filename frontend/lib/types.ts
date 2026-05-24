@@ -125,3 +125,71 @@ export interface ScenarioBundle {
   properties: PropertySpec[];
   graph: { nodes: GraphNode[]; edges: GraphEdge[] };
 }
+
+// --- Review Pipeline ---------------------------------------------------------
+
+export interface ReviewLogItem {
+  title: string;
+  summary: string;
+  evidence: string[];
+  generated_artifact?: string | null;
+}
+
+export type MutationKind =
+  | "remove_guard_clause"
+  | "disable_transition"
+  | "strengthen_or_weaken_guard";
+
+export interface CandidateMutation {
+  id: string;
+  title: string;
+  transition: string;
+  kind: MutationKind;
+  removed_clause?: string | null;
+  new_guard?: string | null;
+  mutated_model: ModelSpec;
+}
+
+export interface RiskHypothesis {
+  id: string;
+  title: string;
+  summary: string;
+  property?: PropertySpec | null;
+  mutation?: CandidateMutation | null;
+  rationale: string;
+  expected_signal: string;
+}
+
+export interface SpecDraftResponse {
+  model: ModelSpec;
+  properties: PropertySpec[];
+  assumptions: string[];
+  review_log: ReviewLogItem[];
+  used_llm: boolean;
+  warnings: string[];
+}
+
+export interface SpecReviewResponse {
+  review_log: ReviewLogItem[];
+  hypotheses: RiskHypothesis[];
+  used_llm: boolean;
+  warnings: string[];
+}
+
+export type HypothesisClassification =
+  | "confirmed_failure"
+  | "no_counterexample"
+  | "timeout"
+  | "invalid";
+
+export interface HypothesisCheckResult {
+  hypothesis: RiskHypothesis;
+  classification: HypothesisClassification;
+  diff?: AssuranceDiffResponse | null;
+  verify?: VerifyResponse | null;
+  error?: string | null;
+}
+
+export interface HypothesisCheckResponse {
+  results: HypothesisCheckResult[];
+}

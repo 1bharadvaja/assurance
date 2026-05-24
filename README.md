@@ -12,7 +12,7 @@ re-verifies after a targeted fix. The verifier core is real: it uses Z3
 to perform bounded reachability and bounded-response checks over models
 loaded from YAML.
 
-The site has two clearly separated experiences:
+The site has four clearly separated experiences:
 
 1. **Guided Review** — a polished walkthrough of one concrete bug
    (a one-line guard change that removes human authorization from the
@@ -22,7 +22,14 @@ The site has two clearly separated experiences:
    yourself (toggle clauses, add predicates, disable transitions, change
    the verification bound) and ask the live FastAPI + Z3 backend what
    breaks. Backed by `/api/assurance-diff`; no canned data.
-3. **Technical Notes** — what the checker can and cannot say, what the
+3. **Review Pipeline** — type a plain-English system description, have a
+   reviewer draft a finite state-machine model and a small set of safety
+   checks, see a structured audit log of observations and risk
+   hypotheses, then hand the hypotheses to Z3 for concrete confirmation
+   or refutation. **AI proposes. Z3 checks.** Falls back to a
+   deterministic reviewer when no `OPENAI_API_KEY` is configured, so the
+   demo is reproducible offline.
+4. **Technical Notes** — what the checker can and cannot say, what the
    public backend's structural and timeout limits are, and where the
    source lives.
 
@@ -65,6 +72,9 @@ Backend endpoints:
 - `POST /api/verify` — check a model against a set of properties at a given bound
 - `POST /api/assurance-diff` — compare two models; classify each property as preserved / regression / fixed / existing-failure, with culprit transition and suggested repair attached to each regression
 - `POST /api/apply-repair` — return a new model with the repair applied
+- `POST /api/review-pipeline/draft` — draft a model + safety checks + audit log from a plain-English description (uses an LLM if `OPENAI_API_KEY` is set, otherwise a deterministic field-robot / warehouse-robot template)
+- `POST /api/review-pipeline/review` — given a model + properties, return observations and risk hypotheses (each a candidate mutation or property worth checking)
+- `POST /api/review-pipeline/check` — run each hypothesis through the existing Z3 verifier; classifies each result as `confirmed_failure`, `no_counterexample`, `timeout`, or `invalid`
 
 ---
 
@@ -89,7 +99,50 @@ The on-screen flow is shaped like a code review:
 
 ---
 
-## 4. Playground
+## 4. Review Pipeline
+
+A five-stage event log, each rendered as its own card:
+
+1. **User intent** — a textarea seeded with a default field-robot
+   description.
+2. **AI draft** — modes, variables, transitions, and safety checks, with
+   the raw JSON behind a disclosure. The badge is honest about whether
+   the response came from an LLM or the deterministic fallback.
+3. **AI review log** — a list of short, externally-checkable
+   observations (each with evidence and an optional generated artifact)
+   plus a list of risk hypotheses. Each hypothesis is either a candidate
+   *mutation* (`remove_guard_clause`, `disable_transition`,
+   `strengthen_or_weaken_guard`) or a candidate *property* to check.
+4. **Formal check (Z3)** — progress events for the work the backend is
+   doing while the hypotheses are sent to `/api/review-pipeline/check`.
+   The progress events describe what the solver is doing in order; the
+   actual outcomes come from the API response.
+5. **Finding** — per-hypothesis result. Each is classified as
+   `confirmed_failure` (with a real counterexample, root cause, and
+   optional repair), `no_counterexample` ("no counterexample found up
+   to bound K", not "the system is safe"), `timeout`, or `invalid`.
+   Counterexamples reuse the Guided Review's timeline, root-cause card,
+   and raw-trace disclosure.
+
+The framing is deliberate: **AI proposes, Z3 checks**. The review log is
+never treated as a proof, and the audit cards never contain raw
+chain-of-thought — every observation is a short auditable claim with
+evidence drawn from the model itself.
+
+### Enabling LLM drafting + review
+
+Set `OPENAI_API_KEY` on the backend (as an HF Space secret or local env
+var). The backend will call `gpt-4o-mini` by default; override with
+`ASSURANCE_LLM_MODEL`. The LLM is asked for strict JSON matching our
+pydantic schema, with audit-log entries instead of private reasoning.
+If the response fails validation we fall back to the deterministic
+reviewer and surface a warning in the response.
+
+Leave the key unset and you'll get the deterministic field-robot /
+warehouse-robot templates — enough for the demo to be reproducible
+without any external service.
+
+## 5. Playground
 
 The Playground is structured around a constrained guard editor — no
 raw-text formula entry as a first-class action.
@@ -117,7 +170,7 @@ raw-text formula entry as a first-class action.
 
 ---
 
-## 5. Formal model
+## 6. Formal model
 
 YAML; enums and booleans only. Each variable has an explicit `initial`.
 Transitions are guarded updates:
@@ -148,7 +201,7 @@ Properties come in two flavours:
 
 ---
 
-## 6. Verification semantics
+## 7. Verification semantics
 
 For a model `M`, properties `Φ`, and bound *K*:
 
@@ -172,7 +225,7 @@ treated as a pass.
 
 ---
 
-## 7. Running locally
+## 8. Running locally
 
 You need Python 3.11+ and Node.js 18+.
 
@@ -221,7 +274,7 @@ docker compose up --build
 
 ---
 
-## 8. Deploying
+## 9. Deploying
 
 The two services deploy independently.
 
@@ -234,6 +287,8 @@ Run all work. Bind to `$PORT` (or `8000`). Environment variables:
 | --- | --- | --- |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed by CORS. Set to your deployed frontend URL in production. | `http://localhost:3000` |
 | `ASSURANCE_SOLVER_TIMEOUT_MS` | Per-query Z3 timeout. Timeouts are reported as a distinct outcome, not a pass. | `5000` |
+| `OPENAI_API_KEY` | Optional. Enables LLM drafting/review in the Review Pipeline. If unset, the deterministic field-robot / warehouse-robot templates are used. | unset |
+| `ASSURANCE_LLM_MODEL` | OpenAI model name used by the Review Pipeline when LLM drafting is enabled. | `gpt-4o-mini` |
 
 Structural limits on every request (compiled in via pydantic, not env):
 
@@ -272,7 +327,7 @@ backend instead of pretending the responses are real.
 
 ---
 
-## 9. Limitations
+## 10. Limitations
 
 - **Bounded only.** A passing result certifies the absence of
   counterexamples up to bound *K*. There is no inductive invariant
@@ -289,7 +344,7 @@ backend instead of pretending the responses are real.
 
 ---
 
-## 10. Future work
+## 11. Future work
 
 - k-induction / IC3 for unbounded proofs.
 - Inductive invariant inference.

@@ -176,3 +176,113 @@ class ApplyRepairRequest(BaseModel):
 
 class ApplyRepairResponse(BaseModel):
     model: ModelSpec
+
+
+# ---------------------------------------------------------------------------
+# Review Pipeline (AI draft + Z3 check)
+#
+# The pipeline endpoints take a plain-English system description, draft a
+# state-machine model + safety checks, propose risk hypotheses, and hand the
+# hypotheses to the existing Z3 verifier. The AI part is optional — if no
+# OPENAI_API_KEY is set the backend falls back to deterministic heuristics
+# for the bundled scenarios. The Z3 step is always real.
+# ---------------------------------------------------------------------------
+
+
+class ReviewLogItem(BaseModel):
+    """One auditable observation in the review log.
+
+    These are short externally-checkable rationale bullets, *not* raw
+    chain-of-thought. The LLM prompt explicitly asks for evidence rather
+    than private reasoning.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    summary: str
+    evidence: List[str] = Field(default_factory=list)
+    generated_artifact: Optional[str] = None
+
+
+class CandidateMutation(BaseModel):
+    """A specific local edit the reviewer wants the solver to check."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    transition: str
+    kind: Literal[
+        "remove_guard_clause",
+        "disable_transition",
+        "strengthen_or_weaken_guard",
+    ]
+    removed_clause: Optional[str] = None
+    new_guard: Optional[str] = None
+    mutated_model: ModelSpec
+
+
+class RiskHypothesis(BaseModel):
+    """A reviewer-proposed unsafe behavior worth handing to the solver."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    summary: str
+    property: Optional[PropertySpec] = None
+    mutation: Optional[CandidateMutation] = None
+    rationale: str
+    expected_signal: str
+
+
+class SpecDraftRequest(BaseModel):
+    description: str = Field(..., min_length=1, max_length=8000)
+    domain_hint: Optional[str] = None
+
+
+class SpecDraftResponse(BaseModel):
+    model: ModelSpec
+    properties: List[PropertySpec] = Field(..., max_length=MAX_PROPERTIES)
+    assumptions: List[str] = Field(default_factory=list)
+    review_log: List[ReviewLogItem] = Field(default_factory=list)
+    used_llm: bool = False
+    warnings: List[str] = Field(default_factory=list)
+
+
+class SpecReviewRequest(BaseModel):
+    model: ModelSpec
+    properties: List[PropertySpec] = Field(..., max_length=MAX_PROPERTIES)
+    description: Optional[str] = None
+
+
+class SpecReviewResponse(BaseModel):
+    review_log: List[ReviewLogItem] = Field(default_factory=list)
+    hypotheses: List[RiskHypothesis] = Field(default_factory=list)
+    used_llm: bool = False
+    warnings: List[str] = Field(default_factory=list)
+
+
+class HypothesisCheckRequest(BaseModel):
+    base_model: ModelSpec
+    properties: List[PropertySpec] = Field(..., max_length=MAX_PROPERTIES)
+    hypotheses: List[RiskHypothesis] = Field(..., max_length=10)
+    bound: int = Field(default=10, ge=1, le=MAX_BOUND)
+
+
+class HypothesisCheckResult(BaseModel):
+    hypothesis: RiskHypothesis
+    classification: Literal[
+        "confirmed_failure",
+        "no_counterexample",
+        "timeout",
+        "invalid",
+    ]
+    diff: Optional[AssuranceDiffResponse] = None
+    verify: Optional[VerifyResponse] = None
+    error: Optional[str] = None
+
+
+class HypothesisCheckResponse(BaseModel):
+    results: List[HypothesisCheckResult] = Field(default_factory=list)

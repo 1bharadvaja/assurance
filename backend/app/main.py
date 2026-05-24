@@ -20,12 +20,23 @@ from .models import (
     ApplyRepairResponse,
     AssuranceDiffRequest,
     AssuranceDiffResponse,
+    HypothesisCheckRequest,
+    HypothesisCheckResponse,
+    SpecDraftRequest,
+    SpecDraftResponse,
+    SpecReviewRequest,
+    SpecReviewResponse,
     VerifyRequest,
     VerifyResponse,
     VerifySummary,
 )
 from .parser import validate_model
 from .repair import apply_repair
+from .review_pipeline import (
+    check_hypotheses,
+    draft_from_description,
+    review_model,
+)
 from .verifier import Verifier
 
 
@@ -127,3 +138,25 @@ def apply_repair_endpoint(req: ApplyRepairRequest):
     new_model = apply_repair(req.model, req.repair)
     _validate_or_raise(new_model)
     return ApplyRepairResponse(model=new_model)
+
+
+# ---------------------------------------------------------------------------
+# Review Pipeline
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/review-pipeline/draft", response_model=SpecDraftResponse)
+def review_pipeline_draft(req: SpecDraftRequest):
+    return draft_from_description(req)
+
+
+@app.post("/api/review-pipeline/review", response_model=SpecReviewResponse)
+def review_pipeline_review(req: SpecReviewRequest):
+    _validate_or_raise(req.model)
+    return review_model(req)
+
+
+@app.post("/api/review-pipeline/check", response_model=HypothesisCheckResponse)
+def review_pipeline_check(req: HypothesisCheckRequest):
+    _validate_or_raise(req.base_model)
+    return check_hypotheses(req)

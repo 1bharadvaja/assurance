@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { GuidedReview } from "../components/GuidedReview";
 import { Playground } from "../components/Playground";
+import { ReviewPipeline } from "../components/ReviewPipeline";
 import { TechnicalNotes } from "../components/TechnicalNotes";
 import { TopNav, type TabId } from "../components/TopNav";
 
@@ -11,12 +12,14 @@ const TAB_FOR_HASH: Record<string, TabId> = {
   "": "guided",
   "#guided": "guided",
   "#playground": "playground",
+  "#review": "review",
   "#notes": "notes",
 };
 
 const HASH_FOR_TAB: Record<TabId, string> = {
   guided: "",
   playground: "#playground",
+  review: "#review",
   notes: "#notes",
 };
 
@@ -51,6 +54,7 @@ export default function Page() {
         <GuidedReview onOpenPlayground={() => select("playground")} />
       )}
       {tab === "playground" && <Playground />}
+      {tab === "review" && <ReviewPipeline />}
       {tab === "notes" && <TechnicalNotes />}
     </main>
   );

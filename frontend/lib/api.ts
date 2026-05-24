@@ -1,9 +1,13 @@
 import type {
   AssuranceDiffResponse,
+  HypothesisCheckResponse,
   ModelSpec,
   PropertySpec,
   RepairSpec,
+  RiskHypothesis,
   ScenarioBundle,
+  SpecDraftResponse,
+  SpecReviewResponse,
   VerifyResponse,
 } from "./types";
 
@@ -185,6 +189,57 @@ export async function applyRepair(
   if (!t) throw new BackendError(`Transition not found: ${repair.transition}`);
   t.guard = repair.new_guard;
   return { model: next };
+}
+
+// ---------------------------------------------------------------------------
+// Review Pipeline
+// ---------------------------------------------------------------------------
+
+export interface SpecDraftRequest {
+  description: string;
+  domain_hint?: string;
+}
+
+export function draftSpec(req: SpecDraftRequest): Promise<SpecDraftResponse> {
+  if (isDemoMode()) {
+    throw new BackendError(
+      "Review Pipeline requires the live verifier backend. The static demo is read-only."
+    );
+  }
+  return postLive<SpecDraftResponse>("/api/review-pipeline/draft", req);
+}
+
+export interface SpecReviewRequest {
+  model: ModelSpec;
+  properties: PropertySpec[];
+  description?: string;
+}
+
+export function reviewSpec(req: SpecReviewRequest): Promise<SpecReviewResponse> {
+  if (isDemoMode()) {
+    throw new BackendError(
+      "Review Pipeline requires the live verifier backend."
+    );
+  }
+  return postLive<SpecReviewResponse>("/api/review-pipeline/review", req);
+}
+
+export interface HypothesisCheckRequest {
+  base_model: ModelSpec;
+  properties: PropertySpec[];
+  hypotheses: RiskHypothesis[];
+  bound: number;
+}
+
+export function checkHypotheses(
+  req: HypothesisCheckRequest
+): Promise<HypothesisCheckResponse> {
+  if (isDemoMode()) {
+    throw new BackendError(
+      "Review Pipeline requires the live verifier backend."
+    );
+  }
+  return postLive<HypothesisCheckResponse>("/api/review-pipeline/check", req);
 }
 
 // ---------------------------------------------------------------------------

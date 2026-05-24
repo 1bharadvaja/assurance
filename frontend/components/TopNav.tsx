@@ -3,11 +3,12 @@
 import clsx from "clsx";
 import { BackendStatus } from "./BackendStatus";
 
-export type TabId = "guided" | "playground" | "notes";
+export type TabId = "guided" | "playground" | "review" | "notes";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "guided", label: "Guided Review" },
   { id: "playground", label: "Playground" },
+  { id: "review", label: "Review Pipeline" },
   { id: "notes", label: "Technical Notes" },
 ];
 
