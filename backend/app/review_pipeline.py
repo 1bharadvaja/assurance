@@ -81,9 +81,11 @@ def review_model(req: SpecReviewRequest) -> SpecReviewResponse:
     if _have_llm():
         llm_result, llm_err = _llm_review(req)
         if llm_result is not None:
-            llm_result.warnings = list(llm_result.warnings) + _lint_hypotheses(
+            extra = _lint_hypotheses(llm_result.hypotheses, req.model)
+            llm_result.hypotheses = _filter_bad_hypotheses(
                 llm_result.hypotheses, req.model
             )
+            llm_result.warnings = list(llm_result.warnings) + extra
             return llm_result
         warnings.append(
             "OpenAI call did not return a valid review"
@@ -91,7 +93,9 @@ def review_model(req: SpecReviewRequest) -> SpecReviewResponse:
             + ". Falling back to the deterministic reviewer."
         )
     resp = _deterministic_review(req, warnings=warnings)
-    resp.warnings = list(resp.warnings) + _lint_hypotheses(resp.hypotheses, req.model)
+    extra = _lint_hypotheses(resp.hypotheses, req.model)
+    resp.hypotheses = _filter_bad_hypotheses(resp.hypotheses, req.model)
+    resp.warnings = list(resp.warnings) + extra
     return resp
 
 
@@ -105,9 +109,8 @@ def _collect_property_lints(properties: List[PropertySpec]) -> List[str]:
 def _lint_hypotheses(
     hypotheses: List["RiskHypothesis"], base_model: "ModelSpec"
 ) -> List[str]:
-    """Flag hypotheses that look semantically off (e.g. removing a clause
-    from a transition that enters a safety/recovery mode — that change is
-    conservative, not unsafe).
+    """Flag hypotheses that look semantically off. Returns the warnings;
+    the list of hypotheses is filtered separately by ``_filter_bad_hypotheses``.
     """
     warnings: List[str] = []
     base_targets = {t.name: t.updates.get("mode") for t in base_model.transitions}
@@ -117,13 +120,34 @@ def _lint_hypotheses(
         target_mode = base_targets.get(h.mutation.transition)
         if target_mode in _RECOVERY_MODES:
             warnings.append(
-                f"Hypothesis `{h.id}` removes a clause from transition "
+                f"Dropped hypothesis `{h.id}` — it removed a clause from "
                 f"`{h.mutation.transition}`, which enters the safety/recovery "
                 f"mode `{target_mode}`. Removing a clause from a recovery "
-                "transition makes it easier to fire, which is the safe "
-                "direction — consider disabling the transition instead."
+                "transition makes the safe response easier to fire (the "
+                "conservative direction), so it is not a useful unsafe "
+                "weakening. Disable the transition instead."
             )
     return warnings
+
+
+def _filter_bad_hypotheses(
+    hypotheses: List["RiskHypothesis"], base_model: "ModelSpec"
+) -> List["RiskHypothesis"]:
+    """Drop hypotheses that remove clauses from transitions entering a
+    recovery mode. Their warnings are emitted separately so the user
+    knows why they were filtered.
+    """
+    base_targets = {t.name: t.updates.get("mode") for t in base_model.transitions}
+    out: List[RiskHypothesis] = []
+    for h in hypotheses:
+        if (
+            h.mutation is not None
+            and h.mutation.kind == "remove_guard_clause"
+            and base_targets.get(h.mutation.transition) in _RECOVERY_MODES
+        ):
+            continue
+        out.append(h)
+    return out
 
 
 def check_hypotheses(req: HypothesisCheckRequest) -> HypothesisCheckResponse:
