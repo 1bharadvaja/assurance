@@ -2,9 +2,11 @@
 
 import clsx from "clsx";
 import { Loader2 } from "lucide-react";
+import { AbstractionPlanView } from "./AbstractionPlanView";
 import { Disclosure } from "./Disclosure";
 import { ModelHealthCheck } from "./ModelHealthCheck";
 import type {
+  AbstractionPlan,
   DraftSource,
   HealthReport,
   ModelSpec,
@@ -39,6 +41,8 @@ interface Props {
   showAcceptButton: boolean;
   /** Optional editor slot rendered inside a disclosure on this card. */
   editPanel?: React.ReactNode;
+  /** Phase-1 modeling decisions, if the LLM path produced one. */
+  abstractionPlan?: AbstractionPlan | null;
   /** Model health check from the backend (may be null for older payloads). */
   health?: HealthReport | null;
   /** Called when the user wants clarifying questions for a blocked draft. */
@@ -65,6 +69,7 @@ export function AIDraftView({
   acceptLabel,
   showAcceptButton,
   editPanel,
+  abstractionPlan,
   health,
   onAskClarification,
   onUseExample,
@@ -96,6 +101,8 @@ export function AIDraftView({
           repairAttempts={resolvedRepairs}
         />
       )}
+
+      {abstractionPlan && <AbstractionPlanView plan={abstractionPlan} />}
 
       {health && <ModelHealthCheck report={health} />}
 

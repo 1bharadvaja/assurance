@@ -28,6 +28,7 @@ from .guards import parse_guard
 from .health_check import run_health_check
 from .property_lint import lint_property
 from .models import (
+    AbstractionPlan,
     AssuranceDiffResponse,
     CandidateMutation,
     ClarifyRequest,
@@ -103,10 +104,35 @@ _MAX_REPAIR_ATTEMPTS = 2
 
 
 def _draft_with_llm_repair_loop(req: SpecDraftRequest) -> SpecDraftResponse:
-    # First LLM call. A catastrophic failure here means we never got a
-    # usable JSON payload — fall through to template fallback rather
-    # than crashing the demo, but label it honestly.
-    draft, llm_err = _llm_draft(req)
+    """Two-phase drafting with a validation-driven repair loop.
+
+    Per product spec, Phase 1 (abstraction plan) runs ONCE on the first
+    attempt; the repair loop reuses that plan rather than regenerating
+    it, which saves a round trip per repair while still giving the LLM
+    explicit modeling decisions to anchor against.
+
+    Phase ordering:
+      1. Phase 1 — abstraction plan. If this fails catastrophically, we
+         skip Phase 1 and fall through to the one-shot prompt (the
+         legacy code path) so a Phase-1 outage doesn't break drafting.
+      2. Phase 2 — generate the formal model from the plan.
+      3. Health check.
+      4. Repair loop (up to _MAX_REPAIR_ATTEMPTS) — same plan, same
+         repair prompt, with the most recent validation errors fed back.
+    """
+
+    # ----- Phase 1: abstraction plan -------------------------------------
+    plan, plan_err = _llm_abstraction_plan(req)
+    plan_warnings: List[str] = []
+    if plan is None and plan_err:
+        plan_warnings.append(
+            "Phase-1 abstraction call failed"
+            + (f" ({plan_err})" if plan_err else "")
+            + ". Falling through to single-shot drafting."
+        )
+
+    # ----- Phase 2: formal model from plan -------------------------------
+    draft, llm_err = _llm_draft(req, plan=plan)
     if draft is None:
         return _deterministic_template_response(
             req,
@@ -118,27 +144,24 @@ def _draft_with_llm_repair_loop(req: SpecDraftRequest) -> SpecDraftResponse:
             ),
         )
 
-    draft.warnings = list(draft.warnings) + _collect_property_lints(
+    draft.warnings = list(draft.warnings) + plan_warnings + _collect_property_lints(
         draft.properties
     )
     draft.health = run_health_check(
         draft.model, draft.properties, req.description
     )
+    draft.abstraction_plan = plan
 
     if draft.health.classification != "blocked":
         draft.draft_source = "llm"
         draft.repair_attempts = 0
         return draft
 
-    # Repair loop. Each iteration sends the current draft + the failing
-    # health-check items back to the LLM and asks for a corrected JSON.
+    # ----- Repair loop ---------------------------------------------------
     for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
         errors = [i for i in draft.health.items if i.severity == "error"]
-        repaired, repair_err = _llm_repair_draft(req, draft, errors)
+        repaired, repair_err = _llm_repair_draft(req, draft, errors, plan=plan)
         if repaired is None:
-            # Repair LLM call itself failed (network, parse, schema). Keep
-            # the previous (blocked) draft and stop retrying — the user
-            # gets the most-recent state.
             draft.warnings = list(draft.warnings) + [
                 f"LLM repair attempt {attempt} failed"
                 + (f": {repair_err}" if repair_err else "")
@@ -152,17 +175,15 @@ def _draft_with_llm_repair_loop(req: SpecDraftRequest) -> SpecDraftResponse:
         repaired.health = run_health_check(
             repaired.model, repaired.properties, req.description
         )
-        # The repaired draft replaces the prior one for the next loop
-        # iteration / final return — always show the most recent attempt.
+        # Preserve the plan from the original Phase-1 call through repairs.
+        repaired.abstraction_plan = plan
         draft = repaired
         draft.repair_attempts = attempt
         if draft.health.classification != "blocked":
             draft.draft_source = "llm_repaired"
             return draft
 
-    # Retries exhausted and the draft is still blocked. Mark explicitly
-    # — the review endpoint will refuse this, and the UI will surface the
-    # blocked panel + clarification flow.
+    # Retries exhausted and the draft is still blocked.
     draft.draft_source = "blocked"
     draft.fallback_reason = (
         "LLM produced a draft that validation could not repair within "
@@ -217,9 +238,11 @@ def review_model(req: SpecReviewRequest) -> SpecReviewResponse:
     if _have_llm():
         llm_result, llm_err = _llm_review(req)
         if llm_result is not None:
-            extra = _lint_hypotheses(llm_result.hypotheses, req.model)
+            extra = _lint_hypotheses(
+                llm_result.hypotheses, req.model, req.abstraction_plan
+            )
             llm_result.hypotheses = _filter_bad_hypotheses(
-                llm_result.hypotheses, req.model
+                llm_result.hypotheses, req.model, req.abstraction_plan
             )
             llm_result.warnings = list(llm_result.warnings) + extra
             return llm_result
@@ -229,8 +252,10 @@ def review_model(req: SpecReviewRequest) -> SpecReviewResponse:
             + ". Falling back to the deterministic reviewer."
         )
     resp = _deterministic_review(req, warnings=warnings)
-    extra = _lint_hypotheses(resp.hypotheses, req.model)
-    resp.hypotheses = _filter_bad_hypotheses(resp.hypotheses, req.model)
+    extra = _lint_hypotheses(resp.hypotheses, req.model, req.abstraction_plan)
+    resp.hypotheses = _filter_bad_hypotheses(
+        resp.hypotheses, req.model, req.abstraction_plan
+    )
     resp.warnings = list(resp.warnings) + extra
     return resp
 
@@ -242,19 +267,40 @@ def _collect_property_lints(properties: List[PropertySpec]) -> List[str]:
     return out
 
 
+def _resolve_recovery_modes(
+    plan: Optional[AbstractionPlan],
+) -> set[str]:
+    """Use plan.recovery_modes when present, else keyword fallback."""
+    if plan and plan.recovery_modes:
+        return set(plan.recovery_modes)
+    return _RECOVERY_MODES
+
+
+def _resolve_critical_modes(
+    plan: Optional[AbstractionPlan],
+) -> set[str]:
+    """Use plan.dangerous_modes when present, else keyword fallback."""
+    if plan and plan.dangerous_modes:
+        return set(plan.dangerous_modes)
+    return _CRITICAL_MODES
+
+
 def _lint_hypotheses(
-    hypotheses: List["RiskHypothesis"], base_model: "ModelSpec"
+    hypotheses: List["RiskHypothesis"],
+    base_model: "ModelSpec",
+    plan: Optional[AbstractionPlan] = None,
 ) -> List[str]:
     """Flag hypotheses that look semantically off. Returns the warnings;
     the list of hypotheses is filtered separately by ``_filter_bad_hypotheses``.
     """
     warnings: List[str] = []
     base_targets = {t.name: t.updates.get("mode") for t in base_model.transitions}
+    recovery = _resolve_recovery_modes(plan)
     for h in hypotheses:
         if h.mutation is None or h.mutation.kind != "remove_guard_clause":
             continue
         target_mode = base_targets.get(h.mutation.transition)
-        if target_mode in _RECOVERY_MODES:
+        if target_mode in recovery:
             warnings.append(
                 f"Dropped hypothesis `{h.id}` — it removed a clause from "
                 f"`{h.mutation.transition}`, which enters the safety/recovery "
@@ -267,19 +313,22 @@ def _lint_hypotheses(
 
 
 def _filter_bad_hypotheses(
-    hypotheses: List["RiskHypothesis"], base_model: "ModelSpec"
+    hypotheses: List["RiskHypothesis"],
+    base_model: "ModelSpec",
+    plan: Optional[AbstractionPlan] = None,
 ) -> List["RiskHypothesis"]:
     """Drop hypotheses that remove clauses from transitions entering a
     recovery mode. Their warnings are emitted separately so the user
     knows why they were filtered.
     """
     base_targets = {t.name: t.updates.get("mode") for t in base_model.transitions}
+    recovery = _resolve_recovery_modes(plan)
     out: List[RiskHypothesis] = []
     for h in hypotheses:
         if (
             h.mutation is not None
             and h.mutation.kind == "remove_guard_clause"
-            and base_targets.get(h.mutation.transition) in _RECOVERY_MODES
+            and base_targets.get(h.mutation.transition) in recovery
         ):
             continue
         out.append(h)
@@ -583,6 +632,150 @@ def _llm_clarify(req: ClarifyRequest) -> tuple[List[str], Optional[str]]:
     return questions, suggested
 
 
+# ---------------------------------------------------------------------------
+# Phase 1 — Abstraction plan
+#
+# The LLM is asked to make its modeling decisions explicit BEFORE it
+# writes any formal JSON. The output (an AbstractionPlan) is itself an
+# auditable artifact the UI surfaces; Phase 2 then consumes the plan
+# and emits the actual ModelSpec / properties.
+# ---------------------------------------------------------------------------
+
+
+_ABSTRACTION_SYSTEM_PROMPT = """\
+You are a formal-methods engineer choosing how to abstract a small
+discrete controller into a finite-state machine. You are NOT writing
+the formal model yet — you are producing the modeling decisions that
+will drive it.
+
+Return ONLY a JSON object that matches this shape:
+
+{
+  "controller_modes": ["Idle", "Active", ...],
+  "environment_inputs": [
+    {"name": "...", "type": "bool" | "enum",
+     "values": ["..."] (only for enum),
+     "initial": false | true | "<enum value>",
+     "rationale": "one sentence explaining why this is an input"}
+  ],
+  "latched_state_variables": [
+    {"name": "...", "type": "bool" | "enum",
+     "values": ["..."] (only for enum),
+     "initial": false | true | "<enum value>",
+     "rationale": "one sentence explaining what physical/remembered fact this tracks"}
+  ],
+  "dangerous_modes": ["..."],
+  "recovery_modes": ["..."],
+  "safety_preconditions": [
+    {"mode": "DangerousMode",
+     "required_conditions": ["cond_a == true", "cond_b == false", ...],
+     "source_text": "the description sentence that motivated this"}
+  ],
+  "response_obligations": [
+    {"trigger": "<predicate>",
+     "response": "<predicate>",
+     "bound": <int>,
+     "source_text": "the description sentence that motivated this"}
+  ],
+  "requirement_mapping": [
+    {"source_text": "exact sentence from the description",
+     "formalization_type": "transition" | "invariant" | "bounded_response" | "assumption" | "ambiguous",
+     "generated_artifact": "short name of the thing to be generated",
+     "notes": ""}
+  ],
+  "ambiguities": ["..."]
+}
+
+KEY DISTINCTIONS — get these right:
+
+1. Controller mode
+   A mutually exclusive operating state, represented by `mode == X`.
+   Examples: Idle, Armed, Mission, TrainPassing, Heating, Infusing.
+
+2. Environment input
+   A sensor/event/fault condition the controller observes but does NOT
+   itself produce. The environment changes it through environment
+   transitions. Examples: train_detected, gate_sensor_fault,
+   pressure_high, air_in_line, occlusion_detected, comms_lost,
+   battery_low, human_authorized, sensor_agreement.
+
+3. Latched state
+   A physical or remembered condition that PERSISTS once set, until a
+   controller transition explicitly resets it. Examples:
+   gate_fully_down, warning_lights_active, line_primed, dose_confirmed,
+   train_cleared.
+
+4. Dangerous mode
+   A mode where entering WITHOUT required preconditions is the unsafe
+   behavior. Examples: TrainPassing, Heating, Infusing, Actuate,
+   Moving, Draining.
+
+5. Recovery mode
+   A mode representing safe response: fault, alarm, shutdown, hold,
+   abort. Examples: Fault, EmergencyShutdown, OcclusionAlarm,
+   AirInLineAlarm, Recovery, Stopped, SafeMode.
+
+CRITICAL — DO NOT skip environment inputs.
+
+If the description says:
+  "train is detected" → environment_inputs MUST contain train_detected
+  "pressure becomes high" → environment_inputs MUST contain pressure
+                            (or pressure_high) with a transition that
+                            can set it
+  "air is detected" → air_in_line (input)
+  "occlusion is detected" → occlusion_detected (input)
+  "comms are lost" → comms (input, enum OK/Lost)
+  "sensor reports a fault" → <name>_fault (input)
+
+For each dangerous mode, every requirement of the form
+"X must not happen unless Y" maps to a safety_precondition with Y in
+required_conditions.
+
+For each requirement of the form "after X, the controller must Y within
+N steps" or "X should reach Y within N", add a response_obligation.
+
+If a sentence is too vague to formalize, list it in ambiguities AND
+mark it ambiguous in requirement_mapping.
+
+Output strict JSON. No prose, no markdown fences.
+"""
+
+
+def _llm_abstraction_plan(
+    req: SpecDraftRequest,
+) -> Tuple[Optional[AbstractionPlan], Optional[str]]:
+    """Phase-1 call. Returns (plan, error_message); exactly one is None.
+
+    A catastrophic failure here doesn't have to abort drafting — the
+    caller can fall back to the legacy one-phase draft path so the demo
+    still works."""
+    try:
+        from openai import OpenAI  # type: ignore
+
+        client = OpenAI()
+        resp = client.chat.completions.create(
+            model=_llm_model_name(),
+            messages=[
+                {"role": "system", "content": _ABSTRACTION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Produce the abstraction plan for this system description.\n\n"
+                        + req.description
+                        + (f"\n\nDomain hint: {req.domain_hint}" if req.domain_hint else "")
+                    ),
+                },
+            ],
+            **_chat_kwargs(),
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        plan = AbstractionPlan.model_validate(data)
+        return plan, None
+    except Exception as exc:
+        return None, _short_err(exc)
+
+
 _SYSTEM_PROMPT = """\
 You are drafting a small finite state-machine model for a formal model
 checker. Return ONLY a JSON object that matches the example shape below
@@ -836,31 +1029,56 @@ Shape (JSON):
 """
 
 
+_PLAN_USER_INSTRUCTION = """\
+You produced this abstraction plan in Phase 1. Generate the formal
+model from it. Every variable in `environment_inputs` and
+`latched_state_variables` MUST appear in `model.variables`. Every
+`controller_modes` value MUST appear in `model.variables.mode.values`.
+Every `safety_preconditions` requirement MUST appear as a guard clause
+on the transition into the corresponding dangerous mode AND as an
+invariant. Every `response_obligations` item MUST appear as a
+bounded_response property. Every environment input MUST have at least
+one transition that can flip it to the value the safety properties
+require.
+
+Stay within: ≤10 variables, ≤25 transitions, ≤10 properties.
+
+Abstraction plan:
+"""
+
+
 def _llm_draft(
     req: SpecDraftRequest,
+    plan: Optional[AbstractionPlan] = None,
 ) -> Tuple[Optional[SpecDraftResponse], Optional[str]]:
     """Returns (response, error_message). One of them is None.
 
-    We surface the error string so the calling endpoint can include a
-    short diagnostic in the response's `warnings` list. We deliberately
-    truncate so we never leak large response bodies into the UI.
+    When `plan` is provided this is Phase 2 of the two-phase pipeline:
+    we hand the LLM its own abstraction plan and ask it to generate the
+    formal model that realises it. When `plan` is None we fall back to
+    the legacy one-shot prompt (used by tests, and by the recovery path
+    when Phase 1 itself fails).
     """
     try:
         from openai import OpenAI  # type: ignore
 
         client = OpenAI()
+        user_content = (
+            "Draft a model for this system description.\n\n"
+            + req.description
+            + (f"\n\nDomain hint: {req.domain_hint}" if req.domain_hint else "")
+        )
+        if plan is not None:
+            user_content += (
+                "\n\n"
+                + _PLAN_USER_INSTRUCTION
+                + json.dumps(plan.model_dump(), indent=2)
+            )
         resp = client.chat.completions.create(
             model=_llm_model_name(),
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "Draft a model for this system description.\n\n"
-                        + req.description
-                        + (f"\n\nDomain hint: {req.domain_hint}" if req.domain_hint else "")
-                    ),
-                },
+                {"role": "user", "content": user_content},
             ],
             **_chat_kwargs(),
         )
@@ -918,13 +1136,16 @@ def _llm_repair_draft(
     req: SpecDraftRequest,
     prior: SpecDraftResponse,
     errors: List["HealthCheckItem"],
+    plan: Optional[AbstractionPlan] = None,
 ) -> Tuple[Optional[SpecDraftResponse], Optional[str]]:
     """Ask the LLM to repair a draft that failed the health check.
 
     The repair prompt feeds back the specific validation errors so the
     model has concrete targets to fix. We deliberately preserve the
     user's original description as the source of truth — the LLM is
-    told not to redrift intent."""
+    told not to redrift intent. When the Phase-1 abstraction plan is
+    available we hand it back too so the repair stays consistent with
+    the original modeling decisions."""
     try:
         from openai import OpenAI  # type: ignore
 
@@ -940,10 +1161,16 @@ def _llm_repair_draft(
             + (f"\n  Suggested fix: {i.suggested_fix}" if i.suggested_fix else "")
             for i in errors
         ]
-        user_msg = (
-            "Original user description:\n"
-            + req.description
-            + "\n\nPrevious draft JSON:\n"
+        user_msg = "Original user description:\n" + req.description
+        if plan is not None:
+            user_msg += (
+                "\n\nAbstraction plan (Phase 1). PRESERVE these modeling "
+                "decisions — do not invent new modes or drop declared "
+                "variables. Fixes must respect this plan:\n"
+                + json.dumps(plan.model_dump(), indent=2)
+            )
+        user_msg += (
+            "\n\nPrevious draft JSON:\n"
             + json.dumps(prior_payload, indent=2)
             + "\n\nValidation errors to fix:\n"
             + "\n".join(err_lines)
@@ -997,6 +1224,13 @@ def _llm_review(
         )
         if req.description:
             user_msg += f"\n\nOriginal description:\n{req.description}"
+        if req.abstraction_plan is not None:
+            user_msg += (
+                "\n\nAbstraction plan (use dangerous_modes / recovery_modes "
+                "to ground hypotheses; do not classify a recovery mode as "
+                "critical):\n"
+                + json.dumps(req.abstraction_plan.model_dump(), indent=2)
+            )
         resp = client.chat.completions.create(
             model=_llm_model_name(),
             messages=[
@@ -1069,7 +1303,9 @@ def _deterministic_draft(
 def _deterministic_review(
     req: SpecReviewRequest, warnings: List[str]
 ) -> SpecReviewResponse:
-    hypotheses, review_log = _propose_hypotheses(req.model, req.properties)
+    hypotheses, review_log = _propose_hypotheses(
+        req.model, req.properties, plan=req.abstraction_plan
+    )
     if not _have_llm():
         warnings = [
             "Using deterministic demo reviewer. Set OPENAI_API_KEY to enable AI review."
@@ -1709,16 +1945,33 @@ _MAX_HYPOTHESES = 6
 
 
 def _propose_hypotheses(
-    model: ModelSpec, properties: List[PropertySpec]
+    model: ModelSpec,
+    properties: List[PropertySpec],
+    plan: Optional[AbstractionPlan] = None,
 ) -> Tuple[List[RiskHypothesis], List[ReviewLogItem]]:
+    """Generate grounded risk hypotheses.
+
+    When `plan` is provided we take dangerous_modes / recovery_modes
+    from the abstraction plan — this is the correct shape for the
+    LLM-first pipeline because it lets the reviewer reason about
+    arbitrary domains the keyword sets never covered. When `plan` is
+    None we fall back to the keyword heuristics so the deterministic
+    template path still works."""
     hypotheses: List[RiskHypothesis] = []
     log: List[ReviewLogItem] = []
 
+    critical_modes = _resolve_critical_modes(plan)
+    recovery_modes = _resolve_recovery_modes(plan)
+    source_label = (
+        "abstraction plan" if plan and (plan.dangerous_modes or plan.recovery_modes)
+        else "keyword heuristic"
+    )
+
     critical = [
-        t for t in model.transitions if t.updates.get("mode") in _CRITICAL_MODES
+        t for t in model.transitions if t.updates.get("mode") in critical_modes
     ]
     recovery = [
-        t for t in model.transitions if t.updates.get("mode") in _RECOVERY_MODES
+        t for t in model.transitions if t.updates.get("mode") in recovery_modes
     ]
 
     if critical:
@@ -1726,7 +1979,7 @@ def _propose_hypotheses(
             ReviewLogItem(
                 title="Critical-state transitions",
                 summary=(
-                    "Found transitions that enter a critical mode: "
+                    f"Found transitions that enter a dangerous mode (via {source_label}): "
                     + ", ".join(
                         f"`{t.name}` → {t.updates.get('mode')}" for t in critical
                     )
@@ -1735,7 +1988,7 @@ def _propose_hypotheses(
                 ),
                 evidence=[
                     f"Transition `{t.name}` updates mode to `{t.updates.get('mode')}` "
-                    f"(treated as a critical mode)."
+                    f"(treated as a dangerous mode)."
                     for t in critical
                 ],
             )
@@ -1746,7 +1999,7 @@ def _propose_hypotheses(
             ReviewLogItem(
                 title="Recovery transitions",
                 summary=(
-                    "Found transitions that enter a safety/recovery mode: "
+                    f"Found transitions that enter a safety/recovery mode (via {source_label}): "
                     + ", ".join(
                         f"`{t.name}` → {t.updates.get('mode')}" for t in recovery
                     )

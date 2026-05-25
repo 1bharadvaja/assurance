@@ -1,4 +1,5 @@
 import type {
+  AbstractionPlan,
   AssuranceDiffResponse,
   ClarifyRequest,
   ClarifyResponse,
@@ -253,6 +254,9 @@ export interface SpecReviewRequest {
   model: ModelSpec;
   properties: PropertySpec[];
   description?: string;
+  /** Round-tripped from the draft response so the reviewer can ground
+   * hypotheses in the original abstraction. Optional for templates. */
+  abstraction_plan?: AbstractionPlan | null;
 }
 
 export function reviewSpec(req: SpecReviewRequest): Promise<SpecReviewResponse> {

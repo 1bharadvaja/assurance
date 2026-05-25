@@ -244,6 +244,7 @@ export function ReviewPipeline() {
         model: activeModel,
         properties: draft.properties,
         description,
+        abstraction_plan: draft.abstraction_plan,
       });
       setReview(resp);
       setReviewedModelSig(activeSig);
@@ -386,10 +387,12 @@ export function ReviewPipeline() {
           AI proposes. Z3 checks.
         </h2>
         <p className="mt-2 max-w-2xl text-[14px] leading-relaxed text-ink-600">
-          LLM drafts a formal model. Validation checks it like a compiler.
-          If the draft is invalid, the system asks the LLM to repair it
-          using the validation errors, or asks the user for clarification.
-          <strong> Z3 only sees validated models.</strong>
+          The LLM first chooses a finite-state abstraction — modes,
+          environment inputs, latched state, dangerous and recovery
+          modes — and only then writes the formal model. Validation
+          checks the model like a compiler; invalid drafts get repaired
+          using the validation errors or the user is asked to clarify.{" "}
+          <strong>Z3 only sees validated models.</strong>
         </p>
         {isDemoMode() && (
           <div className="mt-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
@@ -474,6 +477,7 @@ export function ReviewPipeline() {
                 onAccept={onAcceptDraft}
                 acceptLabel={review ? "Re-run review" : "Accept draft and review weak points"}
                 showAcceptButton
+                abstractionPlan={draft.abstraction_plan}
                 health={draft.health}
                 onAskClarification={onAskClarification}
                 onFixDraft={onFixDraft}

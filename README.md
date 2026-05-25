@@ -129,23 +129,37 @@ never treated as a proof, and the audit cards never contain raw
 chain-of-thought — every observation is a short auditable claim with
 evidence drawn from the model itself.
 
-### Architecture: LLM-first, validation-first
+### Architecture: two-phase LLM drafting, validation-first
 
-The Review Pipeline is built around **dynamic AI-assisted formalization**:
+The Review Pipeline is built around **dynamic AI-assisted formalization**.
+The flow is deliberately split into separate, auditable steps:
 
-1. **LLM dynamically drafts** a finite-state abstraction from the
-   user's plain-English description.
-2. **Model health check validates** the draft (guard syntax, referenced
-   symbols, enum/bool misuse, vacuous properties, mixed and/or, input/
-   event reachability, requirement coverage).
-3. If the health check **blocks** the draft, the backend feeds the
-   specific validation errors back to the LLM and asks for a repaired
-   JSON. We retry at most twice before giving up.
-4. If still blocked after retries, the app **surfaces clarifying
-   questions** rather than pretending a broken draft is formal.
-5. Grounded **hypotheses are generated deterministically** from the
-   validated model — no LLM hallucinations sneak into the review.
-6. **Z3 checks reachability** of each hypothesis.
+1. **Phase 1 — Abstraction plan.** The LLM is asked to act as a
+   formal-methods engineer and produce an *abstraction plan* before
+   writing any formal JSON: which controller modes exist, which
+   variables are environment inputs vs latched state, which modes are
+   dangerous vs recovery, what preconditions guard each dangerous
+   mode, what bounded-response obligations apply, and how each input
+   sentence maps to a transition / invariant / bounded_response /
+   assumption / ambiguity. The plan is itself an auditable artifact
+   the UI surfaces as **"AI modeling decisions"**.
+2. **Phase 2 — Formal model.** The LLM consumes its own abstraction
+   plan and emits the `ModelSpec` + safety properties + assumptions +
+   audit log.
+3. **Model health check** validates the formal model (guard syntax,
+   referenced symbols, enum/bool misuse, vacuous properties, mixed
+   and/or, input/event reachability, requirement coverage).
+4. If the health check **blocks** the draft, the backend feeds the
+   specific validation errors back to the LLM along with the original
+   abstraction plan, and asks for a repaired JSON that preserves the
+   modeling decisions. Retries at most twice.
+5. If still blocked, the app **surfaces clarifying questions** rather
+   than pretending a broken draft is formal.
+6. **Grounded hypotheses** are generated from the validated model —
+   the reviewer reads `plan.dangerous_modes` and `plan.recovery_modes`
+   to ground its mutations, falling back to a small keyword set only
+   when no plan is available.
+7. **Z3 checks reachability** of each hypothesis.
 
 Templates (field robot, warehouse robot, railway crossing) exist only as:
 

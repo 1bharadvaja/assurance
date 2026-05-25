@@ -189,6 +189,93 @@ class ApplyRepairResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Abstraction plan (Phase 1 of two-phase LLM drafting)
+#
+# Before the LLM emits any formal JSON we ask it to make its modeling
+# decisions explicit. These records are NOT private chain-of-thought —
+# they are auditable claims about how the natural-language spec was
+# abstracted into a finite-state machine, and the UI surfaces them so the
+# user can audit the modeling choices before any Z3 work runs.
+# ---------------------------------------------------------------------------
+
+
+class VariablePlan(BaseModel):
+    """One variable the LLM proposes for the formal model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    type: Literal["bool", "enum"]
+    values: Optional[List[str]] = None
+    initial: Union[bool, str]
+    rationale: str
+
+
+class SafetyPreconditionPlan(BaseModel):
+    """Conditions that must hold before entering a dangerous mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    required_conditions: List[str] = Field(default_factory=list)
+    source_text: str = ""
+
+
+class ResponseObligationPlan(BaseModel):
+    """A bounded-response obligation drawn from the description."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trigger: str
+    response: str
+    bound: int
+    source_text: str = ""
+
+
+RequirementFormalization = Literal[
+    "transition",
+    "invariant",
+    "bounded_response",
+    "assumption",
+    "ambiguous",
+]
+
+
+class RequirementMappingItem(BaseModel):
+    """How a sentence from the description maps to a formal artifact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_text: str
+    formalization_type: RequirementFormalization
+    generated_artifact: str = ""
+    notes: str = ""
+
+
+class AbstractionPlan(BaseModel):
+    """The LLM's modeling decisions, returned by Phase 1 of drafting.
+
+    The LLM produces this BEFORE writing any formal JSON. Phase 2
+    consumes this plan and emits the actual ModelSpec / properties.
+    Keeping the plan explicit lets the reviewer use it to ground risk
+    hypotheses (dangerous_modes, recovery_modes, safety_preconditions)
+    instead of relying on hardcoded keyword heuristics.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    controller_modes: List[str] = Field(default_factory=list)
+    environment_inputs: List[VariablePlan] = Field(default_factory=list)
+    latched_state_variables: List[VariablePlan] = Field(default_factory=list)
+    dangerous_modes: List[str] = Field(default_factory=list)
+    recovery_modes: List[str] = Field(default_factory=list)
+    safety_preconditions: List[SafetyPreconditionPlan] = Field(default_factory=list)
+    response_obligations: List[ResponseObligationPlan] = Field(default_factory=list)
+    requirement_mapping: List[RequirementMappingItem] = Field(default_factory=list)
+    ambiguities: List[str] = Field(default_factory=list)
+
+
 class ReviewLogItem(BaseModel):
     """One auditable observation in the review log.
 
@@ -315,12 +402,20 @@ class SpecDraftResponse(BaseModel):
     fallback_reason: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
     health: Optional[HealthReport] = None
+    # Phase-1 modeling decisions. Optional because deterministic templates
+    # don't produce a plan; the LLM path always does.
+    abstraction_plan: Optional[AbstractionPlan] = None
 
 
 class SpecReviewRequest(BaseModel):
     model: ModelSpec
     properties: List[PropertySpec] = Field(..., max_length=MAX_PROPERTIES)
     description: Optional[str] = None
+    # Optional — when present, the reviewer uses the plan's
+    # dangerous_modes / recovery_modes / safety_preconditions instead of
+    # the hardcoded keyword heuristics. Frontend round-trips the plan
+    # from the draft response.
+    abstraction_plan: Optional[AbstractionPlan] = None
 
 
 class SpecReviewResponse(BaseModel):

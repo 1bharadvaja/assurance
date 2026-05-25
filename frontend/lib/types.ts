@@ -188,6 +188,55 @@ export interface HealthReport {
   coverage: HealthCoverage;
 }
 
+// --- Abstraction plan (Phase 1 LLM output) ----------------------------------
+
+export interface VariablePlan {
+  name: string;
+  type: "bool" | "enum";
+  values?: string[] | null;
+  initial: boolean | string;
+  rationale: string;
+}
+
+export interface SafetyPreconditionPlan {
+  mode: string;
+  required_conditions: string[];
+  source_text: string;
+}
+
+export interface ResponseObligationPlan {
+  trigger: string;
+  response: string;
+  bound: number;
+  source_text: string;
+}
+
+export type RequirementFormalization =
+  | "transition"
+  | "invariant"
+  | "bounded_response"
+  | "assumption"
+  | "ambiguous";
+
+export interface RequirementMappingItem {
+  source_text: string;
+  formalization_type: RequirementFormalization;
+  generated_artifact: string;
+  notes: string;
+}
+
+export interface AbstractionPlan {
+  controller_modes: string[];
+  environment_inputs: VariablePlan[];
+  latched_state_variables: VariablePlan[];
+  dangerous_modes: string[];
+  recovery_modes: string[];
+  safety_preconditions: SafetyPreconditionPlan[];
+  response_obligations: ResponseObligationPlan[];
+  requirement_mapping: RequirementMappingItem[];
+  ambiguities: string[];
+}
+
 export type DraftSource =
   | "llm"
   | "llm_repaired"
@@ -214,6 +263,8 @@ export interface SpecDraftResponse {
   fallback_reason?: string | null;
   warnings: string[];
   health?: HealthReport | null;
+  /** Phase-1 modeling decisions, present only when the LLM path ran. */
+  abstraction_plan?: AbstractionPlan | null;
 }
 
 export interface ClarifyRequest {

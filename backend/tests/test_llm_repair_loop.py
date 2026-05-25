@@ -49,6 +49,19 @@ def without_llm_key(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _stub_phase1(monkeypatch):
+    """Default Phase-1 stub: returns (None, None) so the drafter falls
+    through to the legacy single-shot prompt. Individual tests that care
+    about Phase 1 override this explicitly.
+
+    This keeps the pre-two-phase tests valid: they only mock Phase 2 /
+    repair and don't want a real network call from Phase 1.
+    """
+    monkeypatch.setattr(rp, "_llm_abstraction_plan", lambda req: (None, None))
+    yield
+
+
 def _clean_llm_draft() -> SpecDraftResponse:
     """A small, fully-modeled draft that will pass the health check.
 
@@ -158,7 +171,7 @@ def _blocked_llm_draft() -> SpecDraftResponse:
 
 def test_clean_llm_draft_is_labeled_llm(monkeypatch, with_llm_key):
     monkeypatch.setattr(
-        rp, "_llm_draft", lambda req: (_clean_llm_draft(), None)
+        rp, "_llm_draft", lambda req, **kw: (_clean_llm_draft(), None)
     )
     # If repair were ever called something is wrong — make it explode.
     monkeypatch.setattr(
@@ -186,12 +199,12 @@ def test_blocked_then_repaired_is_labeled_llm_repaired(
     monkeypatch, with_llm_key
 ):
     monkeypatch.setattr(
-        rp, "_llm_draft", lambda req: (_blocked_llm_draft(), None)
+        rp, "_llm_draft", lambda req, **kw: (_blocked_llm_draft(), None)
     )
 
     call_count = {"n": 0}
 
-    def fake_repair(req, prior, errors):
+    def fake_repair(req, prior, errors, **kw):
         call_count["n"] += 1
         assert errors, "repair must be called with the failing items"
         return _clean_llm_draft(), None
@@ -215,13 +228,13 @@ def test_blocked_then_repaired_is_labeled_llm_repaired(
 
 def test_blocked_throughout_returns_blocked_source(monkeypatch, with_llm_key):
     monkeypatch.setattr(
-        rp, "_llm_draft", lambda req: (_blocked_llm_draft(), None)
+        rp, "_llm_draft", lambda req, **kw: (_blocked_llm_draft(), None)
     )
     # Every repair attempt also returns a blocked draft.
     monkeypatch.setattr(
         rp,
         "_llm_repair_draft",
-        lambda req, prior, errors: (_blocked_llm_draft(), None),
+        lambda req, prior, errors, **kw: (_blocked_llm_draft(), None),
     )
     resp = rp.draft_from_description(
         SpecDraftRequest(description="describe something")
@@ -236,12 +249,12 @@ def test_blocked_throughout_returns_blocked_source(monkeypatch, with_llm_key):
 def test_blocked_draft_cannot_be_reviewed(monkeypatch, with_llm_key):
     """End-to-end: a blocked draft must not advance to the review step."""
     monkeypatch.setattr(
-        rp, "_llm_draft", lambda req: (_blocked_llm_draft(), None)
+        rp, "_llm_draft", lambda req, **kw: (_blocked_llm_draft(), None)
     )
     monkeypatch.setattr(
         rp,
         "_llm_repair_draft",
-        lambda req, prior, errors: (_blocked_llm_draft(), None),
+        lambda req, prior, errors, **kw: (_blocked_llm_draft(), None),
     )
     draft = rp.draft_from_description(
         SpecDraftRequest(description="describe something")
@@ -267,7 +280,7 @@ def test_catastrophic_llm_failure_uses_template_fallback(
     monkeypatch.setattr(
         rp,
         "_llm_draft",
-        lambda req: (None, "ConnectionError: network unreachable"),
+        lambda req, **kw: (None, "ConnectionError: network unreachable"),
     )
     monkeypatch.setattr(
         rp,
@@ -322,7 +335,7 @@ def test_railway_prompt_with_llm_does_not_use_template(
     description goes through the LLM. A railway prompt must NOT silently
     return the bundled `railway_crossing` template."""
     monkeypatch.setattr(
-        rp, "_llm_draft", lambda req: (_clean_llm_draft(), None)
+        rp, "_llm_draft", lambda req, **kw: (_clean_llm_draft(), None)
     )
     monkeypatch.setattr(
         rp,
