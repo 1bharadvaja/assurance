@@ -3,22 +3,45 @@
 import clsx from "clsx";
 import { Loader2 } from "lucide-react";
 import { Disclosure } from "./Disclosure";
-import type { SpecDraftResponse } from "../lib/types";
+import type { ModelSpec, PropertySpec } from "../lib/types";
 
 interface Props {
-  draft: SpecDraftResponse;
+  /** Original AI-drafted response — used for the provenance badge. */
+  usedLlm: boolean;
+  warnings: string[];
+  /** Current working model (draft + any edits). */
+  model: ModelSpec;
+  properties: PropertySpec[];
+  assumptions: string[];
+  /** Whether the user has made any edits relative to the original draft. */
+  hasEdits: boolean;
   isReviewing: boolean;
   onAccept: () => void;
+  acceptLabel?: string;
   showAcceptButton: boolean;
+  /** Optional editor slot rendered inside a disclosure on this card. */
+  editPanel?: React.ReactNode;
 }
 
-export function AIDraftView({ draft, isReviewing, onAccept, showAcceptButton }: Props) {
-  const modes = (draft.model.variables.mode?.values ?? []) as string[];
-  const otherVars = Object.entries(draft.model.variables).filter(([k]) => k !== "mode");
+export function AIDraftView({
+  usedLlm,
+  warnings,
+  model,
+  properties,
+  assumptions,
+  hasEdits,
+  isReviewing,
+  onAccept,
+  acceptLabel,
+  showAcceptButton,
+  editPanel,
+}: Props) {
+  const modes = (model.variables.mode?.values ?? []) as string[];
+  const otherVars = Object.entries(model.variables).filter(([k]) => k !== "mode");
 
   return (
     <div className="space-y-4">
-      <ProvenanceBadge usedLlm={draft.used_llm} warnings={draft.warnings} />
+      <ProvenanceBadge usedLlm={usedLlm} warnings={warnings} hasEdits={hasEdits} />
 
       <div className="grid gap-4 sm:grid-cols-2">
         <section>
@@ -56,9 +79,9 @@ export function AIDraftView({ draft, isReviewing, onAccept, showAcceptButton }: 
       </div>
 
       <section>
-        <SectionTitle>Transitions ({draft.model.transitions.length})</SectionTitle>
+        <SectionTitle>Transitions ({model.transitions.length})</SectionTitle>
         <ul className="mt-1 max-h-56 space-y-0.5 overflow-y-auto rounded border border-line bg-paper px-3 py-2 font-mono text-[11.5px] leading-5 text-ink-800">
-          {draft.model.transitions.map((t) => (
+          {model.transitions.map((t) => (
             <li key={t.name} className="flex flex-wrap items-baseline gap-2">
               <span className="text-accent">{t.name}</span>
               {t.reactive && (
@@ -74,9 +97,9 @@ export function AIDraftView({ draft, isReviewing, onAccept, showAcceptButton }: 
       </section>
 
       <section>
-        <SectionTitle>Safety checks ({draft.properties.length})</SectionTitle>
+        <SectionTitle>Safety checks ({properties.length})</SectionTitle>
         <ul className="mt-1 space-y-1.5">
-          {draft.properties.map((p) => (
+          {properties.map((p) => (
             <li
               key={p.name}
               className="rounded border border-line bg-paper px-3 py-2 text-[12.5px]"
@@ -96,24 +119,26 @@ export function AIDraftView({ draft, isReviewing, onAccept, showAcceptButton }: 
         </ul>
       </section>
 
-      {draft.assumptions.length > 0 && (
+      {assumptions.length > 0 && (
         <section>
           <SectionTitle>Assumptions</SectionTitle>
           <ul className="mt-1 list-disc pl-5 text-[12.5px] text-ink-700">
-            {draft.assumptions.map((a, i) => (
+            {assumptions.map((a, i) => (
               <li key={i}>{a}</li>
             ))}
           </ul>
         </section>
       )}
 
+      {editPanel && (
+        <Disclosure label="edit transitions before review">
+          {editPanel}
+        </Disclosure>
+      )}
+
       <Disclosure label="raw model JSON">
         <pre className="overflow-x-auto rounded border border-line bg-ink-50 p-3 font-mono text-[11px] leading-5 text-ink-800">
-          {JSON.stringify(
-            { model: draft.model, properties: draft.properties },
-            null,
-            2
-          )}
+          {JSON.stringify({ model, properties }, null, 2)}
         </pre>
       </Disclosure>
 
@@ -128,7 +153,9 @@ export function AIDraftView({ draft, isReviewing, onAccept, showAcceptButton }: 
             )}
           >
             {isReviewing && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {isReviewing ? "Reviewing…" : "Accept draft and review weak points"}
+            {isReviewing
+              ? "Reviewing…"
+              : acceptLabel ?? "Accept draft and review weak points"}
           </button>
         </div>
       )}
@@ -139,10 +166,13 @@ export function AIDraftView({ draft, isReviewing, onAccept, showAcceptButton }: 
 function ProvenanceBadge({
   usedLlm,
   warnings,
+  hasEdits,
 }: {
   usedLlm: boolean;
   warnings: string[];
+  hasEdits: boolean;
 }) {
+  const baseLabel = usedLlm ? "Drafted by LLM" : "Drafted by deterministic reviewer";
   return (
     <div
       className={clsx(
@@ -153,7 +183,12 @@ function ProvenanceBadge({
       )}
     >
       <div className="font-medium">
-        {usedLlm ? "Drafted by LLM" : "Drafted by deterministic reviewer"}
+        {baseLabel}
+        {hasEdits && (
+          <span className="ml-2 rounded bg-ink-900/10 px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wider">
+            edited
+          </span>
+        )}
       </div>
       {warnings.length > 0 && (
         <ul className="mt-1 list-disc pl-5 text-[11.5px]">

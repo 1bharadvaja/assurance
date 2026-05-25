@@ -1,6 +1,7 @@
 "use client";
 
 import clsx from "clsx";
+import { Loader2 } from "lucide-react";
 import { CounterexampleReplay } from "./CounterexampleReplay";
 import { RawTraceDisclosure } from "./RawTraceDisclosure";
 import { RootCauseCard } from "./RootCauseCard";
@@ -8,13 +9,24 @@ import type {
   HypothesisCheckResult,
   ModelSpec,
   PropertySpec,
+  RegressionEntry,
+  VerifyResponse,
 } from "../lib/types";
+
+export interface PostRepairOutcome {
+  verify: VerifyResponse | null;
+  inFlight: boolean;
+  error: string | null;
+}
 
 interface Props {
   results: HypothesisCheckResult[];
   baseModel: ModelSpec;
   properties: PropertySpec[];
   bound: number;
+  /** Per-hypothesis-id outcome of "apply repair and re-verify". */
+  postRepair: Record<string, PostRepairOutcome>;
+  onApplyRepair: (result: HypothesisCheckResult, regression: RegressionEntry) => void;
 }
 
 export function HypothesisResults({
@@ -22,6 +34,8 @@ export function HypothesisResults({
   baseModel,
   properties,
   bound,
+  postRepair,
+  onApplyRepair,
 }: Props) {
   if (results.length === 0) {
     return (
@@ -52,6 +66,8 @@ export function HypothesisResults({
           baseModel={baseModel}
           properties={properties}
           bound={bound}
+          postRepair={postRepair[r.hypothesis.id]}
+          onApplyRepair={onApplyRepair}
         />
       ))}
     </div>
@@ -92,11 +108,15 @@ function ResultBlock({
   baseModel,
   properties,
   bound,
+  postRepair,
+  onApplyRepair,
 }: {
   result: HypothesisCheckResult;
   baseModel: ModelSpec;
   properties: PropertySpec[];
   bound: number;
+  postRepair?: PostRepairOutcome;
+  onApplyRepair: (result: HypothesisCheckResult, regression: RegressionEntry) => void;
 }) {
   const { hypothesis, classification, diff, verify, error } = result;
   const tone =
@@ -167,8 +187,149 @@ function ResultBlock({
         {classification === "confirmed_failure" && verify && (
           <ConfirmedFromVerify verify={verify} bound={bound} baseModel={baseModel} />
         )}
+
+        {classification === "confirmed_failure" && diff && (
+          <RepairPanel
+            result={result}
+            diff={diff}
+            postRepair={postRepair}
+            onApplyRepair={onApplyRepair}
+            properties={properties}
+            bound={bound}
+          />
+        )}
       </div>
     </article>
+  );
+}
+
+function RepairPanel({
+  result,
+  diff,
+  postRepair,
+  onApplyRepair,
+  properties,
+  bound,
+}: {
+  result: HypothesisCheckResult;
+  diff: import("../lib/types").AssuranceDiffResponse;
+  postRepair?: PostRepairOutcome;
+  onApplyRepair: (result: HypothesisCheckResult, regression: RegressionEntry) => void;
+  properties: PropertySpec[];
+  bound: number;
+}) {
+  const reg = diff.regressions[0];
+  if (!reg) return null;
+
+  const repair = reg.suggested_repair;
+  const applied = postRepair?.verify != null;
+  const inFlight = postRepair?.inFlight ?? false;
+  const error = postRepair?.error ?? null;
+
+  if (!repair) {
+    return (
+      <div className="mt-4 rounded border border-line bg-ink-50 px-3 py-2 text-[12.5px] text-ink-700">
+        No automatic repair template matched this failure. Edit the model in
+        Stage 2 and run review again to iterate.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 space-y-3 rounded border border-line bg-ink-50 px-4 py-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-ink-500">
+            Iterate on this model
+          </div>
+          <p className="mt-1 text-[12.5px] text-ink-700">{repair.rationale}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => onApplyRepair(result, reg)}
+          disabled={inFlight || applied}
+          className={clsx(
+            "inline-flex items-center gap-2 rounded-md border px-3.5 py-1.5 text-[12.5px] font-medium transition",
+            applied
+              ? "border-emerald-700 bg-emerald-700 text-white"
+              : "border-accent bg-accent text-white hover:bg-accent-dark disabled:cursor-wait disabled:opacity-70"
+          )}
+        >
+          {inFlight && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          {applied
+            ? "Repair applied"
+            : inFlight
+            ? "Applying & re-verifying…"
+            : "Apply repair and re-verify"}
+        </button>
+      </div>
+
+      <pre className="overflow-x-auto rounded border border-line bg-paper p-2 font-mono text-[11.5px] text-ink-800">
+        {`+ ${repair.add_predicate}\n  on ${repair.transition}.guard`}
+      </pre>
+
+      {error && (
+        <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-900">
+          {error}
+        </div>
+      )}
+
+      {postRepair?.verify && (
+        <PostRepairVerifyView verify={postRepair.verify} bound={bound} properties={properties} />
+      )}
+    </div>
+  );
+}
+
+function PostRepairVerifyView({
+  verify,
+  bound,
+  properties,
+}: {
+  verify: VerifyResponse;
+  bound: number;
+  properties: PropertySpec[];
+}) {
+  const passed = verify.results.filter((r) => r.status === "pass").length;
+  const failed = verify.results.filter((r) => r.status === "fail").length;
+  const timeouts = verify.results.filter((r) => r.status === "timeout").length;
+  const ok = failed === 0 && timeouts === 0;
+  void properties;
+  return (
+    <div
+      className={clsx(
+        "rounded border px-3 py-2 text-[12.5px]",
+        ok ? "border-emerald-200 bg-emerald-50/60" : "border-red-200 bg-red-50/50"
+      )}
+    >
+      <div className={clsx("font-medium", ok ? "text-emerald-900" : "text-red-900")}>
+        Re-verification: {passed}/{verify.results.length} pass
+        {failed > 0 ? ` · ${failed} fail` : ""}
+        {timeouts > 0 ? ` · ${timeouts} timeout` : ""}
+      </div>
+      <ul className="mt-1 space-y-0.5">
+        {verify.results.map((r) => (
+          <li key={r.property} className="flex items-center justify-between gap-3 font-mono text-[11.5px]">
+            <span className="text-ink-700">{r.title || r.property}</span>
+            <span
+              className={
+                r.status === "pass"
+                  ? "text-emerald-700"
+                  : r.status === "fail"
+                  ? "text-red-700"
+                  : "text-amber-700"
+              }
+            >
+              {r.status}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1 text-[11px] text-ink-500">
+        Verified the patched model against the original safety checks up to
+        bound {bound}.
+      </p>
+    </div>
   );
 }
 
