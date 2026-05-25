@@ -449,6 +449,9 @@ export function ReviewPipeline() {
                   loading={isReviewing}
                 />
               )}
+              {review.warnings.length > 0 && (
+                <ReviewWarnings warnings={review.warnings} />
+              )}
               <div>
                 <SectionLabel>Observations</SectionLabel>
                 <div className="mt-2">
@@ -631,6 +634,19 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div className="text-[11px] font-medium uppercase tracking-wider text-ink-500">
       {children}
+    </div>
+  );
+}
+
+function ReviewWarnings({ warnings }: { warnings: string[] }) {
+  return (
+    <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
+      <div className="font-medium">Reviewer caveats</div>
+      <ul className="mt-1 list-disc pl-5">
+        {warnings.map((w, i) => (
+          <li key={i}>{w}</li>
+        ))}
+      </ul>
     </div>
   );
 }

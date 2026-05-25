@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import uuid
 from typing import Any, Iterable, List, Optional, Tuple
 
@@ -24,6 +25,7 @@ from .counterexample import find_culprit
 from .diff import diff_results
 from .explain import explain_failure
 from .guards import parse_guard
+from .property_lint import lint_property
 from .models import (
     AssuranceDiffResponse,
     CandidateMutation,
@@ -60,13 +62,18 @@ def draft_from_description(req: SpecDraftRequest) -> SpecDraftResponse:
     if _have_llm():
         llm_result, llm_err = _llm_draft(req)
         if llm_result is not None:
+            llm_result.warnings = list(llm_result.warnings) + _collect_property_lints(
+                llm_result.properties
+            )
             return llm_result
         warnings.append(
             "OpenAI call did not return a valid model"
             + (f" ({llm_err})" if llm_err else "")
             + ". Falling back to the deterministic reviewer."
         )
-    return _deterministic_draft(req, warnings=warnings)
+    resp = _deterministic_draft(req, warnings=warnings)
+    resp.warnings = list(resp.warnings) + _collect_property_lints(resp.properties)
+    return resp
 
 
 def review_model(req: SpecReviewRequest) -> SpecReviewResponse:
@@ -74,13 +81,49 @@ def review_model(req: SpecReviewRequest) -> SpecReviewResponse:
     if _have_llm():
         llm_result, llm_err = _llm_review(req)
         if llm_result is not None:
+            llm_result.warnings = list(llm_result.warnings) + _lint_hypotheses(
+                llm_result.hypotheses, req.model
+            )
             return llm_result
         warnings.append(
             "OpenAI call did not return a valid review"
             + (f" ({llm_err})" if llm_err else "")
             + ". Falling back to the deterministic reviewer."
         )
-    return _deterministic_review(req, warnings=warnings)
+    resp = _deterministic_review(req, warnings=warnings)
+    resp.warnings = list(resp.warnings) + _lint_hypotheses(resp.hypotheses, req.model)
+    return resp
+
+
+def _collect_property_lints(properties: List[PropertySpec]) -> List[str]:
+    out: List[str] = []
+    for p in properties:
+        out.extend(lint_property(p))
+    return out
+
+
+def _lint_hypotheses(
+    hypotheses: List["RiskHypothesis"], base_model: "ModelSpec"
+) -> List[str]:
+    """Flag hypotheses that look semantically off (e.g. removing a clause
+    from a transition that enters a safety/recovery mode — that change is
+    conservative, not unsafe).
+    """
+    warnings: List[str] = []
+    base_targets = {t.name: t.updates.get("mode") for t in base_model.transitions}
+    for h in hypotheses:
+        if h.mutation is None or h.mutation.kind != "remove_guard_clause":
+            continue
+        target_mode = base_targets.get(h.mutation.transition)
+        if target_mode in _RECOVERY_MODES:
+            warnings.append(
+                f"Hypothesis `{h.id}` removes a clause from transition "
+                f"`{h.mutation.transition}`, which enters the safety/recovery "
+                f"mode `{target_mode}`. Removing a clause from a recovery "
+                "transition makes it easier to fire, which is the safe "
+                "direction — consider disabling the transition instead."
+            )
+    return warnings
 
 
 def check_hypotheses(req: HypothesisCheckRequest) -> HypothesisCheckResponse:
@@ -214,6 +257,25 @@ No arithmetic, no function calls, no string literals.
 LIMITS: at most 10 variables, at most 25 transitions, at most 10
 properties. Do not claim anything is proven.
 
+CRITICAL — PROPERTY WELL-FORMEDNESS:
+- NEVER write a clause of the form `var == A and var == B` where A and
+  B are distinct literals. A single variable cannot equal two values at
+  once, so the conjunction is unsatisfiable and the invariant is
+  vacuous. Use `or` for the "either/or" reading, e.g.
+  `mode == Mission or mode == DegradedComms`.
+- When a condition mixes `and` and `or`, ALWAYS add parentheses to make
+  the grouping explicit. Python evaluates `and` before `or`, so
+  `not (mode == Mixing or mode == Heating and lid_locked == false)`
+  is parsed as
+  `not (mode == Mixing or (mode == Heating and lid_locked == false))`,
+  which is almost certainly not what you meant. Prefer:
+  `not ((mode == Mixing or mode == Heating) and lid_locked == false)`
+  or split into two invariants.
+- Sensor-disagreement style checks should usually be a
+  bounded_response, not an invariant: trigger on
+  `mode == Heating and temperature_sensor_agreement == false`,
+  response `mode == EmergencyShutdown`, bound 1 or 2.
+
 CRITICAL — REACHABILITY. The solver can only find a counterexample if the
 critical state (e.g. Actuate, Loading) is *reachable* from the initial
 state under the drafted transitions. That means you MUST include the
@@ -315,7 +377,36 @@ Do not include chain-of-thought. Each review item must be a concise,
 externally-checkable observation with evidence drawn from the model — not
 private reasoning.
 
-Rules:
+POLARITY (very important — most common mistake):
+Classify each transition by the role of its destination mode.
+
+- CRITICAL destinations: the system is supposed to enter them only under
+  tight preconditions. Examples: `Actuate`, `Moving`, `Loading`,
+  `Heating`, `Draining`, `Mixing`, `TrainPassing`, `Infusing`,
+  `OpenValve`, `ThrusterFire`, `Dispense`, `Fire`.
+  For these, the unsafe weakening is to REMOVE a precondition clause
+  from the transition's guard. Generate `remove_guard_clause` mutations.
+
+- RECOVERY / SAFETY destinations: the system is supposed to be able to
+  reach them as a safety response. Examples: `EmergencyShutdown`,
+  `EmergencyStop`, `EmergencyLand`, `Recovery`, `Venting`, `Fault`,
+  `SafeMode`, `Alarm`, `Abort`, `Shutdown`, `Hold`.
+  For these, removing a clause makes the safe response EASIER to fire,
+  which is the CONSERVATIVE direction — NOT a useful unsafe
+  hypothesis. The unsafe direction is to DISABLE the transition (so
+  recovery never fires) or to ADD an extra precondition clause that
+  makes recovery harder to fire. Generate `disable_transition`
+  mutations (or `strengthen_or_weaken_guard` if you want to harden the
+  guard).
+
+- Pre-state checks like `mode == Idle` are structural — don't bother
+  removing them, that just breaks the transition.
+
+DO NOT generate `remove_guard_clause` mutations on transitions whose
+destination is a recovery mode. That is a frequent source of bad
+findings.
+
+Other rules:
 - Do not claim a property holds or fails. The solver decides.
 - Each hypothesis must have either a `property` (a PropertySpec, see
   invariant / bounded_response shapes from the draft prompt) or a
@@ -323,9 +414,7 @@ Rules:
 - `mutated_model` must be the full ModelSpec with the edit already
   applied (same shape as the input model, same field names: `name`,
   `variables`, `transitions`).
-- Generate 1–4 hypotheses focused on transitions that enter a critical
-  state (e.g. Actuate, Moving near a human, Loading) whose guards
-  reference oversight predicates.
+- Generate 1–6 hypotheses. Cap at 6.
 
 Shape (JSON):
 {
@@ -830,26 +919,62 @@ def _warehouse_robot_draft():
 # ---------------------------------------------------------------------------
 # Deterministic hypothesis generation
 #
-# We focus on the canonical pattern: a guard on a transition to a "critical"
-# state contains an oversight predicate (e.g. `human_authorized == true`).
-# Removing that predicate is a one-line edit that the solver can confirm or
-# refute by finding a reachable trace.
+# Hypotheses are *polarity-aware*. Transitions that drive the system into a
+# critical (dangerous) mode are probed by removing precondition clauses —
+# that's the direction where the change weakens safety. Transitions that
+# drive the system into a recovery / safety mode are probed by *disabling*
+# them or by tightening their guards — removing clauses from a recovery
+# transition makes it easier to fire, which is the *safe* direction and is
+# therefore not a useful risk hypothesis.
 # ---------------------------------------------------------------------------
 
 
-# (variable, value) pairs that we treat as "critical mode" markers when we
-# see them as a transition's `mode` update target.
-_CRITICAL_MODES = {"Actuate", "Loading", "Moving"}
+# Modes the system is supposed to enter only under tight preconditions.
+# Removing a guard clause on a transition to one of these is a risky
+# weakening worth handing to the solver.
+_CRITICAL_MODES = {
+    "Actuate",
+    "Loading",
+    "Moving",
+    "Heating",
+    "Draining",
+    "Mixing",
+    "TrainPassing",
+    "Infusing",
+    "OpenValve",
+    "ThrusterFire",
+    "Fire",
+    "Dispense",
+}
 
 
-# Predicate substrings we treat as oversight clauses worth probing.
-_OVERSIGHT_TOKENS = [
-    "human_authorized",
-    "supervisor_override",
-    "sensor_agreement",
-    "sensors_agree",
-    "operator_authorized",
-]
+# Modes the system is supposed to be able to enter as a safety response.
+# Removing a guard clause from a transition that enters one of these
+# WEAKENS the precondition — making the safe response easier — which is
+# the *conservative* direction, not a meaningful unsafe weakening.
+_RECOVERY_MODES = {
+    "EmergencyShutdown",
+    "EmergencyStop",
+    "EmergencyLand",
+    "Recovery",
+    "Venting",
+    "Fault",
+    "SafeMode",
+    "Alarm",
+    "Abort",
+    "Shutdown",
+    "Hold",
+}
+
+
+# Clauses that are pre-state checks (e.g. `mode == Idle`) are structural;
+# removing them just breaks the transition rather than weakening safety.
+def _is_pre_state_check(clause: str) -> bool:
+    return bool(re.match(r"^\s*mode\s*==\s*\w+\s*$", clause))
+
+
+# Conservative cap on how many hypotheses to emit so the UI stays readable.
+_MAX_HYPOTHESES = 6
 
 
 def _propose_hypotheses(
@@ -858,87 +983,132 @@ def _propose_hypotheses(
     hypotheses: List[RiskHypothesis] = []
     log: List[ReviewLogItem] = []
 
-    # Identify candidate critical transitions.
     critical = [
         t for t in model.transitions if t.updates.get("mode") in _CRITICAL_MODES
     ]
+    recovery = [
+        t for t in model.transitions if t.updates.get("mode") in _RECOVERY_MODES
+    ]
+
     if critical:
         log.append(
             ReviewLogItem(
-                title="Critical action transitions",
+                title="Critical-state transitions",
                 summary=(
-                    "Found transitions that drive the controller into a "
-                    "critical mode: "
-                    + ", ".join(f"`{t.name}` → {t.updates.get('mode')}" for t in critical)
+                    "Found transitions that enter a critical mode: "
+                    + ", ".join(
+                        f"`{t.name}` → {t.updates.get('mode')}" for t in critical
+                    )
+                    + ". Their preconditions are the natural place to look for "
+                    "unsafe weakenings."
                 ),
                 evidence=[
-                    f"Transition `{t.name}` updates mode to `{t.updates.get('mode')}`."
+                    f"Transition `{t.name}` updates mode to `{t.updates.get('mode')}` "
+                    f"(treated as a critical mode)."
                     for t in critical
                 ],
             )
         )
 
-    seen_predicates: List[Tuple[str, str]] = []
-    for trans in critical:
-        clauses = split_top_conjuncts(trans.guard)
-        for clause in clauses:
-            for token in _OVERSIGHT_TOKENS:
-                if token in clause and (trans.name, clause) not in seen_predicates:
-                    seen_predicates.append((trans.name, clause))
-                    hyp = _build_remove_clause_hypothesis(
-                        model, properties, trans, clause
+    if recovery:
+        log.append(
+            ReviewLogItem(
+                title="Recovery transitions",
+                summary=(
+                    "Found transitions that enter a safety/recovery mode: "
+                    + ", ".join(
+                        f"`{t.name}` → {t.updates.get('mode')}" for t in recovery
                     )
-                    if hyp is not None:
-                        hypotheses.append(hyp)
-                        log.append(
-                            ReviewLogItem(
-                                title=f"Oversight predicate on `{trans.name}`",
-                                summary=(
-                                    f"`{clause}` looks like an oversight check. "
-                                    "Generated a mutation that removes it to "
-                                    "see whether the critical state becomes "
-                                    "reachable without operator consent."
-                                ),
-                                evidence=[
-                                    f"Clause `{clause}` mentions an oversight predicate.",
-                                    f"It guards transition `{trans.name}` whose updates set mode = `{trans.updates.get('mode')}`.",
-                                ],
-                                generated_artifact=f"remove `{clause}` from `{trans.name}.guard`",
-                            )
-                        )
+                    + ". Removing clauses from these makes the safe response "
+                    "easier, not harder — so the unsafe weakening here is to "
+                    "*disable* them instead."
+                ),
+                evidence=[
+                    f"Transition `{t.name}` updates mode to `{t.updates.get('mode')}` "
+                    f"(treated as a recovery mode)."
+                    for t in recovery
+                ],
+            )
+        )
 
-    # If a `low_battery_*` style reactive transition exists, also propose
-    # disabling it as a separate hypothesis — the bounded-response check
-    # for battery recovery is a natural target for this.
-    for trans in model.transitions:
-        if trans.reactive and "battery" in trans.guard:
-            hyp = _build_disable_hypothesis(model, properties, trans)
-            if hyp is not None:
-                hypotheses.append(hyp)
-                log.append(
-                    ReviewLogItem(
-                        title=f"Reactive recovery transition `{trans.name}`",
-                        summary=(
-                            "Disabling this reactive transition should leave "
-                            "the robot in a high-risk mode after the battery "
-                            "drops. Sent to the solver to confirm."
-                        ),
-                        evidence=[
-                            f"Transition `{trans.name}` is reactive and references battery in its guard.",
-                        ],
-                        generated_artifact=f"disable transition `{trans.name}`",
-                    )
+    seen_remove: List[Tuple[str, str]] = []
+    seen_disable: set[str] = set()
+
+    # (1) Critical transitions: propose removing each non-pre-state clause.
+    for trans in critical:
+        if len(hypotheses) >= _MAX_HYPOTHESES:
+            break
+        for clause in split_top_conjuncts(trans.guard):
+            if _is_pre_state_check(clause):
+                continue
+            key = (trans.name, " ".join(clause.split()))
+            if key in seen_remove:
+                continue
+            seen_remove.append(key)
+            hyp = _build_remove_clause_hypothesis(model, properties, trans, clause)
+            if hyp is None:
+                continue
+            hypotheses.append(hyp)
+            log.append(
+                ReviewLogItem(
+                    title=f"Precondition on `{trans.name}`",
+                    summary=(
+                        f"Generated a mutation that drops `{clause}` from the "
+                        f"guard on `{trans.name}` so the solver can decide "
+                        "whether the critical state becomes reachable without "
+                        "that precondition."
+                    ),
+                    evidence=[
+                        f"Clause `{clause}` looks like a safety precondition.",
+                        f"It guards `{trans.name}` whose updates set "
+                        f"mode = `{trans.updates.get('mode')}`.",
+                    ],
+                    generated_artifact=f"remove `{clause}` from `{trans.name}.guard`",
                 )
-            break  # one is enough
+            )
+            if len(hypotheses) >= _MAX_HYPOTHESES:
+                break
+
+    # (2) Recovery transitions: propose disabling each.
+    for trans in recovery:
+        if len(hypotheses) >= _MAX_HYPOTHESES:
+            break
+        if trans.name in seen_disable:
+            continue
+        seen_disable.add(trans.name)
+        hyp = _build_disable_hypothesis(model, properties, trans)
+        if hyp is None:
+            continue
+        hypotheses.append(hyp)
+        log.append(
+            ReviewLogItem(
+                title=f"Disable recovery `{trans.name}`",
+                summary=(
+                    f"Generated a mutation that disables `{trans.name}` — the "
+                    "transition that drives the system into "
+                    f"`{trans.updates.get('mode')}`. If a bounded-response "
+                    "check on this recovery exists, the solver should now "
+                    "find a violation."
+                ),
+                evidence=[
+                    f"Transition `{trans.name}` updates mode to "
+                    f"`{trans.updates.get('mode')}` (recovery mode).",
+                    "Removing the transition is the unsafe direction; "
+                    "removing clauses would only make it easier to fire.",
+                ],
+                generated_artifact=f"disable transition `{trans.name}`",
+            )
+        )
 
     if not hypotheses:
         log.append(
             ReviewLogItem(
-                title="No oversight predicates spotted",
+                title="No risky candidates spotted",
                 summary=(
-                    "Did not find oversight clauses on transitions that enter "
-                    "a critical mode. Re-running the bundled properties "
-                    "against the model unchanged."
+                    "Did not find transitions that enter a critical or "
+                    "recovery mode whose mutation would change safety. "
+                    "Re-running the bundled properties against the unchanged "
+                    "model."
                 ),
                 evidence=[],
             )
