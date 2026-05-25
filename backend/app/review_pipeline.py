@@ -396,6 +396,32 @@ def _llm_model_name() -> str:
     return os.getenv("ASSURANCE_LLM_MODEL", _DEFAULT_LLM_MODEL)
 
 
+# Reasoning-tier OpenAI models (o-series, gpt-5+) only accept the default
+# `temperature=1` — passing `temperature=0` returns a 400. Classic chat
+# models (gpt-4, gpt-4o, gpt-4.1) accept any value and benefit from
+# `temperature=0` for deterministic structured-JSON output.
+def _supports_custom_temperature(model: str) -> bool:
+    lower = model.lower()
+    if lower.startswith(("o1", "o3", "o4")):
+        return False
+    if lower.startswith("gpt-5"):
+        return False
+    return True
+
+
+def _chat_kwargs() -> dict:
+    """Common kwargs for the OpenAI chat.completions.create call.
+
+    Adds `temperature=0` for models that accept it and always asks for
+    JSON-object responses. Callers pass `model` and `messages` themselves.
+    """
+    model = _llm_model_name()
+    kwargs: dict = {"response_format": {"type": "json_object"}}
+    if _supports_custom_temperature(model):
+        kwargs["temperature"] = 0
+    return kwargs
+
+
 class BlockedDraftError(Exception):
     """Raised by review_model when the draft fails the health check."""
 
@@ -546,8 +572,7 @@ def _llm_clarify(req: ClarifyRequest) -> tuple[List[str], Optional[str]]:
             {"role": "system", "content": _CLARIFY_PROMPT},
             {"role": "user", "content": msg},
         ],
-        response_format={"type": "json_object"},
-        temperature=0,
+        **_chat_kwargs(),
     )
     raw = resp.choices[0].message.content or "{}"
     data = json.loads(raw)
@@ -837,8 +862,7 @@ def _llm_draft(
                     ),
                 },
             ],
-            response_format={"type": "json_object"},
-            temperature=0,
+            **_chat_kwargs(),
         )
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
@@ -931,8 +955,7 @@ def _llm_repair_draft(
                 {"role": "system", "content": _REPAIR_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
-            response_format={"type": "json_object"},
-            temperature=0,
+            **_chat_kwargs(),
         )
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
@@ -980,8 +1003,7 @@ def _llm_review(
                 {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
-            response_format={"type": "json_object"},
-            temperature=0,
+            **_chat_kwargs(),
         )
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
