@@ -727,18 +727,24 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function captionFor(source: SpecDraftResponse["draft_source"], repairs: number): string {
+function captionFor(
+  source: SpecDraftResponse["draft_source"] | null | undefined,
+  repairs: number | null | undefined,
+): string {
+  const r = repairs ?? 0;
   switch (source) {
     case "llm":
       return "from LLM";
     case "llm_repaired":
-      return repairs === 1 ? "LLM + 1 repair pass" : `LLM + ${repairs} repair passes`;
+      return r === 1 ? "LLM + 1 repair pass" : `LLM + ${r} repair passes`;
     case "template_fallback":
       return "template fallback (LLM failed)";
     case "deterministic_fallback":
       return "template fallback (no LLM key)";
     case "blocked":
       return "blocked by validation";
+    default:
+      return "";
   }
 }
 

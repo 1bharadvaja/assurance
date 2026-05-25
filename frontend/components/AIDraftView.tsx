@@ -14,10 +14,14 @@ import type {
 interface Props {
   /** Original AI-drafted response — used for the provenance badge. */
   usedLlm: boolean;
-  /** Explicit provenance — drives the badge copy. */
-  draftSource: DraftSource;
+  /**
+   * Explicit provenance — drives the badge copy. Marked optional so an
+   * older backend that doesn't yet return this field can't crash the
+   * page; we fall back to inferring from `usedLlm`.
+   */
+  draftSource?: DraftSource | null;
   /** Number of LLM repair round trips. 0 for clean / template drafts. */
-  repairAttempts: number;
+  repairAttempts?: number | null;
   /** Optional human-readable reason for any non-LLM source. */
   fallbackReason?: string | null;
   /** OpenAI model that produced the draft, if any. */
@@ -70,22 +74,26 @@ export function AIDraftView({
   const otherVars = Object.entries(model.variables).filter(([k]) => k !== "mode");
   const blocked = health?.classification === "blocked";
   const withWarnings = health?.classification === "checkable_with_warnings";
+  // Defensive defaults — an older backend may not return draft_source /
+  // repair_attempts yet, and rendering must not crash because of that.
+  const resolvedSource: DraftSource = draftSource ?? (usedLlm ? "llm" : "deterministic_fallback");
+  const resolvedRepairs: number = repairAttempts ?? 0;
 
   return (
     <div className="space-y-4">
       <ProvenanceBadge
-        draftSource={draftSource}
+        draftSource={resolvedSource}
         llmModelName={llmModelName}
         fallbackReason={fallbackReason}
-        repairAttempts={repairAttempts}
+        repairAttempts={resolvedRepairs}
         warnings={warnings}
         hasEdits={hasEdits}
       />
 
-      {(repairAttempts > 0 || draftSource === "blocked") && (
+      {(resolvedRepairs > 0 || resolvedSource === "blocked") && (
         <RepairTimeline
-          draftSource={draftSource}
-          repairAttempts={repairAttempts}
+          draftSource={resolvedSource}
+          repairAttempts={resolvedRepairs}
         />
       )}
 
@@ -317,7 +325,7 @@ function ProvenanceBadge({
 }
 
 function describeSource(
-  source: DraftSource,
+  source: DraftSource | null | undefined,
   ctx: { llmModelName?: string | null; repairAttempts: number }
 ): { label: string; tone: "llm" | "template" | "blocked" } {
   const model = ctx.llmModelName ? `: ${ctx.llmModelName}` : "";
@@ -343,6 +351,10 @@ function describeSource(
       };
     case "blocked":
       return { label: "Draft blocked by validation", tone: "blocked" };
+    default:
+      // Older backend that doesn't yet send draft_source. Fall back to
+      // the generic "drafted" label so the UI keeps rendering.
+      return { label: `Drafted${model}`, tone: "template" };
   }
 }
 

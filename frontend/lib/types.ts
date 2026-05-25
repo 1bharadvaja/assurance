@@ -205,10 +205,12 @@ export interface SpecDraftResponse {
   /**
    * Explicit provenance. Render labels off this field — never call the
    * draft "LLM" output unless `draft_source` is `"llm"` or
-   * `"llm_repaired"`.
+   * `"llm_repaired"`. Marked optional so an older backend that doesn't
+   * yet return the field doesn't crash the page; the UI infers a sane
+   * default from `used_llm` in that case.
    */
-  draft_source: DraftSource;
-  repair_attempts: number;
+  draft_source?: DraftSource | null;
+  repair_attempts?: number | null;
   fallback_reason?: string | null;
   warnings: string[];
   health?: HealthReport | null;
