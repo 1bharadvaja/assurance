@@ -386,11 +386,10 @@ export function ReviewPipeline() {
           AI proposes. Z3 checks.
         </h2>
         <p className="mt-2 max-w-2xl text-[14px] leading-relaxed text-ink-600">
-          AI drafts a state-machine model and safety checks from your
-          description. <strong>Drafts are untrusted until they pass
-          validation.</strong> Z3 only checks validated finite-state
-          models. If validation fails, the app asks for clarification
-          instead of pretending the model is formal.
+          LLM drafts a formal model. Validation checks it like a compiler.
+          If the draft is invalid, the system asks the LLM to repair it
+          using the validation errors, or asks the user for clarification.
+          <strong> Z3 only sees validated models.</strong>
         </p>
         {isDemoMode() && (
           <div className="mt-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
@@ -445,7 +444,7 @@ export function ReviewPipeline() {
           title="AI draft"
           caption={
             draft
-              ? `${draft.used_llm ? "from LLM" : "deterministic"}${
+              ? `${captionFor(draft.draft_source, draft.repair_attempts)}${
                   hasEdits ? " · edited" : ""
                 }`
               : ""
@@ -462,6 +461,9 @@ export function ReviewPipeline() {
             <>
               <AIDraftView
                 usedLlm={draft.used_llm}
+                draftSource={draft.draft_source}
+                repairAttempts={draft.repair_attempts}
+                fallbackReason={draft.fallback_reason}
                 llmModelName={draft.llm_model_name}
                 warnings={draft.warnings}
                 model={activeModel}
@@ -723,6 +725,21 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   );
+}
+
+function captionFor(source: SpecDraftResponse["draft_source"], repairs: number): string {
+  switch (source) {
+    case "llm":
+      return "from LLM";
+    case "llm_repaired":
+      return repairs === 1 ? "LLM + 1 repair pass" : `LLM + ${repairs} repair passes`;
+    case "template_fallback":
+      return "template fallback (LLM failed)";
+    case "deterministic_fallback":
+      return "template fallback (no LLM key)";
+    case "blocked":
+      return "blocked by validation";
+  }
 }
 
 function ReviewWarnings({ warnings }: { warnings: string[] }) {

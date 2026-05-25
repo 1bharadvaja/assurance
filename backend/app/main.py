@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import List
+
+# Load backend/.env (if present) BEFORE anything reads env vars. The
+# file is gitignored — see backend/.env.example for the supported keys.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:  # pragma: no cover — dotenv is in requirements but optional
+    pass
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware

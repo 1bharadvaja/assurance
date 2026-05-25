@@ -5,6 +5,9 @@ PyYAML==6.0.2
 z3-solver==4.13.4.0
 pytest==8.3.4
 httpx==0.28.1
+# Loads backend/.env at process start so OPENAI_API_KEY and
+# ASSURANCE_LLM_MODEL are picked up without having to `source` first.
+python-dotenv==1.0.1
 # Optional — only used by the Review Pipeline when OPENAI_API_KEY is set.
 # The deterministic fallback path doesn't import openai, so missing the
 # package just means "no LLM drafting".

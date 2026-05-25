@@ -129,30 +129,63 @@ never treated as a proof, and the audit cards never contain raw
 chain-of-thought — every observation is a short auditable claim with
 evidence drawn from the model itself.
 
+### Architecture: LLM-first, validation-first
+
+The Review Pipeline is built around **dynamic AI-assisted formalization**:
+
+1. **LLM dynamically drafts** a finite-state abstraction from the
+   user's plain-English description.
+2. **Model health check validates** the draft (guard syntax, referenced
+   symbols, enum/bool misuse, vacuous properties, mixed and/or, input/
+   event reachability, requirement coverage).
+3. If the health check **blocks** the draft, the backend feeds the
+   specific validation errors back to the LLM and asks for a repaired
+   JSON. We retry at most twice before giving up.
+4. If still blocked after retries, the app **surfaces clarifying
+   questions** rather than pretending a broken draft is formal.
+5. Grounded **hypotheses are generated deterministically** from the
+   validated model — no LLM hallucinations sneak into the review.
+6. **Z3 checks reachability** of each hypothesis.
+
+Templates (field robot, warehouse robot, railway crossing) exist only as:
+
+- Example starter prompts in the frontend.
+- Test fixtures and golden references.
+- **Fallback** when no LLM key is configured.
+- Emergency fallback when the LLM call itself throws (network error,
+  malformed JSON) — clearly labelled as `template_fallback` in the
+  response so the UI never calls it "LLM output".
+
+When an LLM key is configured we **never** silently route a railway
+prompt to a railway template — the LLM is always asked to draft, and
+the validation loop is what pushes it toward a checkable model.
+
 ### Enabling LLM drafting + review
 
 Set `OPENAI_API_KEY` on the backend (as an HF Space secret or local env
 var). The backend will call `gpt-4o-mini` by default; override with
 `ASSURANCE_LLM_MODEL`. The LLM is asked for strict JSON matching our
 pydantic schema, with audit-log entries instead of private reasoning.
-If the response fails validation we fall back to the deterministic
-reviewer and surface a warning in the response.
 
 **Strongly recommended:** point `ASSURANCE_LLM_MODEL` at the strongest
-reasoning model available to your account (e.g. `gpt-4o`,
-`gpt-4.1`, or a later frontier model). The Review Pipeline asks the
-LLM to draft a full finite-state model plus environment transitions
-plus safety properties in one pass — smaller models routinely
-under-model the environment (e.g. declaring `train_detected` without
-emitting a `detect_train` transition). The model health check catches
-the worst of these (see *Input / event reachability* below) but a
-stronger model produces cleaner first drafts. The frontend surfaces
-the model name as part of the provenance badge ("Drafted by LLM:
-gpt-4.1") so you can tell which model produced any given artifact.
+reasoning model available to your account (e.g. `gpt-4o`, `gpt-4.1`,
+or a later frontier model). The Review Pipeline asks the LLM to draft
+a full finite-state model plus environment transitions plus safety
+properties in one pass — smaller models routinely under-model the
+environment (e.g. declaring `train_detected` without emitting a
+`detect_train` transition). The repair loop usually fixes these on the
+second try, but a stronger model produces cleaner first drafts.
+
+The response's `draft_source` field records what actually happened
+(`llm`, `llm_repaired`, `template_fallback`, `deterministic_fallback`,
+or `blocked`); the UI shows this verbatim along with `repair_attempts`
+and the model name (e.g. "Drafted by LLM and repaired through
+validation feedback: gpt-4.1 (1 repair pass)").
 
 Leave the key unset and you'll get the deterministic field-robot /
 warehouse-robot / railway-crossing templates — enough for the demo to
-be reproducible without any external service.
+be reproducible without any external service. They are clearly
+labelled "Template fallback — no LLM configured".
 
 ### Model health check
 

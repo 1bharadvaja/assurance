@@ -274,15 +274,45 @@ class HealthReport(BaseModel):
     coverage: HealthCoverage
 
 
+DraftSource = Literal[
+    # First-pass LLM draft passed validation with no repair needed.
+    "llm",
+    # LLM draft was blocked by health-check; LLM repaired it within the
+    # retry budget. ``repair_attempts`` reflects how many round trips.
+    "llm_repaired",
+    # LLM was configured but a catastrophic failure (network error,
+    # un-parseable JSON, schema validation failure) made it unusable;
+    # a deterministic template was substituted with explicit labelling.
+    "template_fallback",
+    # No LLM key configured. Deterministic template by design.
+    "deterministic_fallback",
+    # LLM produced JSON, but health-check still flags hard errors after
+    # the repair retries exhausted. The model is NOT safe to review.
+    "blocked",
+]
+
+
 class SpecDraftResponse(BaseModel):
     model: ModelSpec
     properties: List[PropertySpec] = Field(..., max_length=MAX_PROPERTIES)
     assumptions: List[str] = Field(default_factory=list)
     review_log: List[ReviewLogItem] = Field(default_factory=list)
+    # Legacy boolean kept for backward compatibility with older frontends.
+    # New code should prefer `draft_source`.
     used_llm: bool = False
     # When `used_llm` is true, the OpenAI model name actually used. Surfaced
     # so the UI can label provenance honestly ("Drafted by LLM: gpt-4o").
     llm_model_name: Optional[str] = None
+    # Explicit provenance of the draft. The UI MUST label drafts using this
+    # field, not infer from `used_llm` alone — a template fallback that
+    # happened because the LLM failed should not be shown as LLM output.
+    draft_source: DraftSource = "deterministic_fallback"
+    # How many LLM repair round trips the backend ran. 0 for clean first
+    # drafts and for templates.
+    repair_attempts: int = 0
+    # Human-readable reason for any non-`llm` source. Empty when the LLM
+    # succeeded cleanly.
+    fallback_reason: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
     health: Optional[HealthReport] = None
 

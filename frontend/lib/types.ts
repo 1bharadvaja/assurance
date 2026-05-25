@@ -188,6 +188,13 @@ export interface HealthReport {
   coverage: HealthCoverage;
 }
 
+export type DraftSource =
+  | "llm"
+  | "llm_repaired"
+  | "template_fallback"
+  | "deterministic_fallback"
+  | "blocked";
+
 export interface SpecDraftResponse {
   model: ModelSpec;
   properties: PropertySpec[];
@@ -195,6 +202,14 @@ export interface SpecDraftResponse {
   review_log: ReviewLogItem[];
   used_llm: boolean;
   llm_model_name?: string | null;
+  /**
+   * Explicit provenance. Render labels off this field — never call the
+   * draft "LLM" output unless `draft_source` is `"llm"` or
+   * `"llm_repaired"`.
+   */
+  draft_source: DraftSource;
+  repair_attempts: number;
+  fallback_reason?: string | null;
   warnings: string[];
   health?: HealthReport | null;
 }

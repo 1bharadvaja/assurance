@@ -32,6 +32,8 @@ from .models import (
     CandidateMutation,
     ClarifyRequest,
     ClarifyResponse,
+    DraftSource,
+    HealthCheckItem,
     HypothesisCheckRequest,
     HypothesisCheckResponse,
     HypothesisCheckResult,
@@ -61,25 +63,140 @@ from .verifier import Verifier
 
 
 def draft_from_description(req: SpecDraftRequest) -> SpecDraftResponse:
-    warnings: List[str] = []
+    """LLM-first drafting with a validation-driven repair loop.
+
+    Policy (per the product spec):
+
+    - When ``OPENAI_API_KEY`` is configured we ALWAYS call the LLM. If the
+      first draft passes the model health check we return it as
+      ``draft_source="llm"``. If it is blocked we feed the validation
+      errors back to the LLM and ask for a repaired JSON, up to
+      ``_MAX_REPAIR_ATTEMPTS`` times. A repaired draft that subsequently
+      validates is labelled ``"llm_repaired"`` with ``repair_attempts``
+      reflecting how many round trips were needed.
+
+    - If the LLM call itself fails catastrophically (network error,
+      un-parseable JSON, schema mismatch) we fall back to a deterministic
+      template and label it ``"template_fallback"`` with the failure
+      reason in ``fallback_reason`` — the UI must NOT pretend this is
+      LLM output.
+
+    - If the LLM produces JSON but health-check still blocks after the
+      retry budget is exhausted, we return the latest blocked draft as
+      ``draft_source="blocked"``. Review and Z3 will both refuse it.
+
+    - When no LLM is configured, the deterministic template is used by
+      design and labelled ``"deterministic_fallback"``.
+    """
     if _have_llm():
-        llm_result, llm_err = _llm_draft(req)
-        if llm_result is not None:
-            llm_result.warnings = list(llm_result.warnings) + _collect_property_lints(
-                llm_result.properties
-            )
-            llm_result.health = run_health_check(
-                llm_result.model, llm_result.properties, req.description
-            )
-            return llm_result
-        warnings.append(
-            "OpenAI call did not return a valid model"
-            + (f" ({llm_err})" if llm_err else "")
-            + ". Falling back to the deterministic reviewer."
+        return _draft_with_llm_repair_loop(req)
+    return _deterministic_template_response(
+        req,
+        source="deterministic_fallback",
+        fallback_reason=None,
+    )
+
+
+# How many times we ask the LLM to repair a blocked draft before we give
+# up and return the blocked draft for the user to inspect.
+_MAX_REPAIR_ATTEMPTS = 2
+
+
+def _draft_with_llm_repair_loop(req: SpecDraftRequest) -> SpecDraftResponse:
+    # First LLM call. A catastrophic failure here means we never got a
+    # usable JSON payload — fall through to template fallback rather
+    # than crashing the demo, but label it honestly.
+    draft, llm_err = _llm_draft(req)
+    if draft is None:
+        return _deterministic_template_response(
+            req,
+            source="template_fallback",
+            fallback_reason=(
+                "LLM call did not return a usable model"
+                + (f" ({llm_err})" if llm_err else "")
+                + ". Returning a deterministic template so the demo can continue."
+            ),
         )
-    resp = _deterministic_draft(req, warnings=warnings)
+
+    draft.warnings = list(draft.warnings) + _collect_property_lints(
+        draft.properties
+    )
+    draft.health = run_health_check(
+        draft.model, draft.properties, req.description
+    )
+
+    if draft.health.classification != "blocked":
+        draft.draft_source = "llm"
+        draft.repair_attempts = 0
+        return draft
+
+    # Repair loop. Each iteration sends the current draft + the failing
+    # health-check items back to the LLM and asks for a corrected JSON.
+    for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
+        errors = [i for i in draft.health.items if i.severity == "error"]
+        repaired, repair_err = _llm_repair_draft(req, draft, errors)
+        if repaired is None:
+            # Repair LLM call itself failed (network, parse, schema). Keep
+            # the previous (blocked) draft and stop retrying — the user
+            # gets the most-recent state.
+            draft.warnings = list(draft.warnings) + [
+                f"LLM repair attempt {attempt} failed"
+                + (f": {repair_err}" if repair_err else "")
+                + "."
+            ]
+            break
+
+        repaired.warnings = list(repaired.warnings) + _collect_property_lints(
+            repaired.properties
+        )
+        repaired.health = run_health_check(
+            repaired.model, repaired.properties, req.description
+        )
+        # The repaired draft replaces the prior one for the next loop
+        # iteration / final return — always show the most recent attempt.
+        draft = repaired
+        draft.repair_attempts = attempt
+        if draft.health.classification != "blocked":
+            draft.draft_source = "llm_repaired"
+            return draft
+
+    # Retries exhausted and the draft is still blocked. Mark explicitly
+    # — the review endpoint will refuse this, and the UI will surface the
+    # blocked panel + clarification flow.
+    draft.draft_source = "blocked"
+    draft.fallback_reason = (
+        "LLM produced a draft that validation could not repair within "
+        f"{_MAX_REPAIR_ATTEMPTS} attempts. Review and Z3 are disabled. "
+        "Use the clarification flow or pick a starter example."
+    )
+    return draft
+
+
+def _deterministic_template_response(
+    req: SpecDraftRequest,
+    source: DraftSource,
+    fallback_reason: Optional[str],
+) -> SpecDraftResponse:
+    """Build a deterministic-template SpecDraftResponse labelled honestly.
+
+    Templates are picked by a tiny keyword classifier — but ONLY in the
+    fallback paths, so the railway/warehouse/field choices never silently
+    replace an LLM draft when a key is configured.
+    """
+    extra_warnings: List[str] = []
+    if source == "deterministic_fallback":
+        extra_warnings.append(
+            "Using deterministic demo reviewer. Set OPENAI_API_KEY to enable AI drafting."
+        )
+    elif source == "template_fallback" and fallback_reason:
+        extra_warnings.append(fallback_reason)
+
+    resp = _deterministic_draft(req, warnings=extra_warnings)
     resp.warnings = list(resp.warnings) + _collect_property_lints(resp.properties)
     resp.health = run_health_check(resp.model, resp.properties, req.description)
+    resp.draft_source = source
+    resp.repair_attempts = 0
+    resp.fallback_reason = fallback_reason
     return resp
 
 
@@ -744,6 +861,100 @@ def _llm_draft(
         return None, _short_err(exc)
 
 
+_REPAIR_PROMPT = """\
+You previously produced a finite-state model, but the model health
+checker found hard errors that prevent the formal checker from running.
+Return ONLY a corrected JSON object that follows the SAME schema as the
+original draft (top-level "model", "properties", "assumptions",
+"review_log"; same field names). Do not include chain-of-thought.
+
+Rules:
+- Do NOT change the user's intent. Preserve the modes, the meaning of
+  each variable, and the safety properties.
+- Do NOT invent unsupported variables or syntax. Stick to the guard
+  grammar: == != and or not parentheses, `in [..]`, bare enum values,
+  bool keywords true / false.
+- Fix the SPECIFIC errors below. Apply the suggested fix when one is
+  given. Do not introduce new safety properties unless required to
+  satisfy a checker.
+- For input/event reachability errors: add an environment transition
+  that flips the offending bool to the required value. Example: if
+  `train_detected == true` is referenced but no transition sets it
+  true, add `{"name": "detect_train", "guard": "train_detected == false",
+  "updates": {"train_detected": true}}`.
+- For enum/boolean misuse: replace the offending compare with the
+  suggested fix. Do NOT add a brand-new bool variable unless that is
+  what the fix says to do.
+- A bounded-response property is only meaningful if the trigger state is
+  reachable from the initial state via the transitions you draft.
+"""
+
+
+def _llm_repair_draft(
+    req: SpecDraftRequest,
+    prior: SpecDraftResponse,
+    errors: List["HealthCheckItem"],
+) -> Tuple[Optional[SpecDraftResponse], Optional[str]]:
+    """Ask the LLM to repair a draft that failed the health check.
+
+    The repair prompt feeds back the specific validation errors so the
+    model has concrete targets to fix. We deliberately preserve the
+    user's original description as the source of truth — the LLM is
+    told not to redrift intent."""
+    try:
+        from openai import OpenAI  # type: ignore
+
+        client = OpenAI()
+        prior_payload = {
+            "model": prior.model.model_dump(),
+            "properties": [p.model_dump() for p in prior.properties],
+            "assumptions": list(prior.assumptions),
+            "review_log": [r.model_dump() for r in prior.review_log],
+        }
+        err_lines = [
+            f"- [{i.category}] {i.title}: {i.message}"
+            + (f"\n  Suggested fix: {i.suggested_fix}" if i.suggested_fix else "")
+            for i in errors
+        ]
+        user_msg = (
+            "Original user description:\n"
+            + req.description
+            + "\n\nPrevious draft JSON:\n"
+            + json.dumps(prior_payload, indent=2)
+            + "\n\nValidation errors to fix:\n"
+            + "\n".join(err_lines)
+        )
+        resp = client.chat.completions.create(
+            model=_llm_model_name(),
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": _REPAIR_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        parsed = SpecDraftResponse.model_validate(
+            {
+                "model": data.get("model"),
+                "properties": data.get("properties", []),
+                "assumptions": data.get("assumptions", []),
+                "review_log": data.get("review_log", []),
+                "used_llm": True,
+                "llm_model_name": _llm_model_name(),
+                "warnings": [],
+            }
+        )
+        validate_model(parsed.model)
+        for p in parsed.properties:
+            validate_property(p)
+        return parsed, None
+    except Exception as exc:
+        return None, _short_err(exc)
+
+
 def _llm_review(
     req: SpecReviewRequest,
 ) -> Tuple[Optional[SpecReviewResponse], Optional[str]]:
@@ -807,6 +1018,15 @@ def _short_err(exc: Exception) -> str:
 def _deterministic_draft(
     req: SpecDraftRequest, warnings: List[str]
 ) -> SpecDraftResponse:
+    """Picks one of the bundled templates by keyword.
+
+    IMPORTANT: this routine is only reached from the fallback paths in
+    ``draft_from_description`` — never when an LLM key is configured and
+    the LLM call succeeded. The caller is responsible for stamping
+    ``draft_source`` ("deterministic_fallback" / "template_fallback")
+    and for warning the user that the output is templated, not LLM-
+    drafted.
+    """
     kind = _classify_description(req.description, req.domain_hint)
     if kind == "warehouse_robot":
         model, properties, assumptions, review_log = _warehouse_robot_draft()
@@ -814,9 +1034,6 @@ def _deterministic_draft(
         model, properties, assumptions, review_log = _railway_crossing_draft()
     else:
         model, properties, assumptions, review_log = _field_robot_draft()
-    note = "Using deterministic demo reviewer. Set OPENAI_API_KEY to enable AI drafting."
-    if not _have_llm():
-        warnings = [note] + warnings
     return SpecDraftResponse(
         model=model,
         properties=properties,

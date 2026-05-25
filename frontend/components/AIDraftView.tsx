@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 import { Disclosure } from "./Disclosure";
 import { ModelHealthCheck } from "./ModelHealthCheck";
 import type {
+  DraftSource,
   HealthReport,
   ModelSpec,
   PropertySpec,
@@ -13,6 +14,12 @@ import type {
 interface Props {
   /** Original AI-drafted response — used for the provenance badge. */
   usedLlm: boolean;
+  /** Explicit provenance — drives the badge copy. */
+  draftSource: DraftSource;
+  /** Number of LLM repair round trips. 0 for clean / template drafts. */
+  repairAttempts: number;
+  /** Optional human-readable reason for any non-LLM source. */
+  fallbackReason?: string | null;
   /** OpenAI model that produced the draft, if any. */
   llmModelName?: string | null;
   warnings: string[];
@@ -40,6 +47,9 @@ interface Props {
 
 export function AIDraftView({
   usedLlm,
+  draftSource,
+  repairAttempts,
+  fallbackReason,
   llmModelName,
   warnings,
   model,
@@ -64,11 +74,20 @@ export function AIDraftView({
   return (
     <div className="space-y-4">
       <ProvenanceBadge
-        usedLlm={usedLlm}
+        draftSource={draftSource}
         llmModelName={llmModelName}
+        fallbackReason={fallbackReason}
+        repairAttempts={repairAttempts}
         warnings={warnings}
         hasEdits={hasEdits}
       />
+
+      {(repairAttempts > 0 || draftSource === "blocked") && (
+        <RepairTimeline
+          draftSource={draftSource}
+          repairAttempts={repairAttempts}
+        />
+      )}
 
       {health && <ModelHealthCheck report={health} />}
 
@@ -250,38 +269,42 @@ export function AIDraftView({
 }
 
 function ProvenanceBadge({
-  usedLlm,
+  draftSource,
   llmModelName,
+  fallbackReason,
+  repairAttempts,
   warnings,
   hasEdits,
 }: {
-  usedLlm: boolean;
+  draftSource: DraftSource;
   llmModelName?: string | null;
+  fallbackReason?: string | null;
+  repairAttempts: number;
   warnings: string[];
   hasEdits: boolean;
 }) {
-  const baseLabel = usedLlm
-    ? llmModelName
-      ? `Drafted by LLM: ${llmModelName}`
-      : "Drafted by LLM"
-    : "Drafted by deterministic reviewer";
+  const { label, tone } = describeSource(draftSource, {
+    llmModelName,
+    repairAttempts,
+  });
+  const toneClass = {
+    llm: "border-violet-200 bg-violet-50 text-violet-900",
+    template: "border-amber-200 bg-amber-50 text-amber-900",
+    blocked: "border-red-200 bg-red-50 text-red-900",
+  }[tone];
   return (
-    <div
-      className={clsx(
-        "rounded border px-3 py-2 text-[12.5px]",
-        usedLlm
-          ? "border-violet-200 bg-violet-50 text-violet-900"
-          : "border-amber-200 bg-amber-50 text-amber-900"
-      )}
-    >
+    <div className={clsx("rounded border px-3 py-2 text-[12.5px]", toneClass)}>
       <div className="flex flex-wrap items-baseline gap-2 font-medium">
-        <span>{baseLabel}</span>
+        <span>{label}</span>
         {hasEdits && (
           <span className="rounded bg-ink-900/10 px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wider">
             edited
           </span>
         )}
       </div>
+      {fallbackReason && (
+        <p className="mt-1 text-[11.5px] leading-snug">{fallbackReason}</p>
+      )}
       {warnings.length > 0 && (
         <ul className="mt-1 list-disc pl-5 text-[11.5px]">
           {warnings.map((w, i) => (
@@ -290,6 +313,94 @@ function ProvenanceBadge({
         </ul>
       )}
     </div>
+  );
+}
+
+function describeSource(
+  source: DraftSource,
+  ctx: { llmModelName?: string | null; repairAttempts: number }
+): { label: string; tone: "llm" | "template" | "blocked" } {
+  const model = ctx.llmModelName ? `: ${ctx.llmModelName}` : "";
+  switch (source) {
+    case "llm":
+      return { label: `Drafted by LLM${model}`, tone: "llm" };
+    case "llm_repaired":
+      return {
+        label: `Drafted by LLM and repaired through validation feedback${model}${
+          ctx.repairAttempts ? ` (${ctx.repairAttempts} repair pass${ctx.repairAttempts === 1 ? "" : "es"})` : ""
+        }`,
+        tone: "llm",
+      };
+    case "template_fallback":
+      return {
+        label: "Template fallback used — LLM call failed validation",
+        tone: "template",
+      };
+    case "deterministic_fallback":
+      return {
+        label: "Template fallback used — no LLM configured",
+        tone: "template",
+      };
+    case "blocked":
+      return { label: "Draft blocked by validation", tone: "blocked" };
+  }
+}
+
+function RepairTimeline({
+  draftSource,
+  repairAttempts,
+}: {
+  draftSource: DraftSource;
+  repairAttempts: number;
+}) {
+  const steps: { label: string; state: "done" | "fail" }[] = [
+    { label: "LLM draft", state: "done" },
+  ];
+  if (repairAttempts > 0 || draftSource === "blocked") {
+    steps.push({ label: "Health check found issues", state: "done" });
+  }
+  for (let i = 1; i <= repairAttempts; i++) {
+    steps.push({ label: `LLM repair attempt ${i}`, state: "done" });
+  }
+  if (draftSource === "llm_repaired") {
+    steps.push({ label: "Health check passed", state: "done" });
+    steps.push({ label: "Ready for review", state: "done" });
+  } else if (draftSource === "blocked") {
+    steps.push({ label: "Still blocked — review disabled", state: "fail" });
+  } else if (draftSource === "llm") {
+    // No repair happened — timeline won't render anyway.
+    steps.push({ label: "Health check passed", state: "done" });
+  }
+
+  return (
+    <section className="rounded border border-line bg-paper px-4 py-3 text-[12px]">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-ink-500">
+        Drafting pipeline
+      </div>
+      <ol className="mt-2 space-y-0.5 text-ink-700">
+        {steps.map((s, i) => (
+          <li key={i} className="flex items-baseline gap-2">
+            <span
+              className={clsx(
+                "inline-block min-w-[1.5rem] text-right font-mono text-[10.5px]",
+                s.state === "fail" ? "text-red-700" : "text-ink-400"
+              )}
+            >
+              {i + 1}.
+            </span>
+            <span
+              className={
+                s.state === "fail"
+                  ? "text-red-800"
+                  : "text-ink-800"
+              }
+            >
+              {s.label}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
