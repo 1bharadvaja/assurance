@@ -160,19 +160,61 @@ export interface RiskHypothesis {
   expected_signal: string;
 }
 
+export type HealthSeverity = "pass" | "warning" | "error";
+export type HealthClassification =
+  | "checkable"
+  | "checkable_with_warnings"
+  | "blocked";
+
+export interface HealthCheckItem {
+  category: string;
+  title: string;
+  severity: HealthSeverity;
+  message: string;
+  suggested_fix?: string | null;
+}
+
+export interface HealthCoverage {
+  requirements_mentioned: number;
+  requirements_mapped: number;
+  properties_generated: number;
+  transitions_count: number;
+  variables_count: number;
+}
+
+export interface HealthReport {
+  classification: HealthClassification;
+  items: HealthCheckItem[];
+  coverage: HealthCoverage;
+}
+
 export interface SpecDraftResponse {
   model: ModelSpec;
   properties: PropertySpec[];
   assumptions: string[];
   review_log: ReviewLogItem[];
   used_llm: boolean;
+  llm_model_name?: string | null;
   warnings: string[];
+  health?: HealthReport | null;
+}
+
+export interface ClarifyRequest {
+  description: string;
+  health_items: HealthCheckItem[];
+}
+
+export interface ClarifyResponse {
+  questions: string[];
+  suggested_rewrite?: string | null;
+  used_llm: boolean;
 }
 
 export interface SpecReviewResponse {
   review_log: ReviewLogItem[];
   hypotheses: RiskHypothesis[];
   used_llm: boolean;
+  llm_model_name?: string | null;
   warnings: string[];
 }
 

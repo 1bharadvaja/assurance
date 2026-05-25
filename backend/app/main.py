@@ -20,6 +20,8 @@ from .models import (
     ApplyRepairResponse,
     AssuranceDiffRequest,
     AssuranceDiffResponse,
+    ClarifyRequest,
+    ClarifyResponse,
     HypothesisCheckRequest,
     HypothesisCheckResponse,
     SpecDraftRequest,
@@ -33,7 +35,9 @@ from .models import (
 from .parser import validate_model
 from .repair import apply_repair
 from .review_pipeline import (
+    BlockedDraftError,
     check_hypotheses,
+    clarify_description,
     draft_from_description,
     review_model,
 )
@@ -153,10 +157,25 @@ def review_pipeline_draft(req: SpecDraftRequest):
 @app.post("/api/review-pipeline/review", response_model=SpecReviewResponse)
 def review_pipeline_review(req: SpecReviewRequest):
     _validate_or_raise(req.model)
-    return review_model(req)
+    try:
+        return review_model(req)
+    except BlockedDraftError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "kind": "draft_blocked_by_health_check",
+                "message": str(exc),
+                "items": [i.model_dump() for i in exc.items],
+            },
+        )
 
 
 @app.post("/api/review-pipeline/check", response_model=HypothesisCheckResponse)
 def review_pipeline_check(req: HypothesisCheckRequest):
     _validate_or_raise(req.base_model)
     return check_hypotheses(req)
+
+
+@app.post("/api/review-pipeline/clarify", response_model=ClarifyResponse)
+def review_pipeline_clarify(req: ClarifyRequest):
+    return clarify_description(req)

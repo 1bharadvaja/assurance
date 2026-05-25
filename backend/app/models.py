@@ -242,13 +242,49 @@ class SpecDraftRequest(BaseModel):
     domain_hint: Optional[str] = None
 
 
+HealthSeverity = Literal["pass", "warning", "error"]
+HealthClassification = Literal["checkable", "checkable_with_warnings", "blocked"]
+
+
+class HealthCheckItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: str
+    title: str
+    severity: HealthSeverity
+    message: str
+    suggested_fix: Optional[str] = None
+
+
+class HealthCoverage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requirements_mentioned: int = 0
+    requirements_mapped: int = 0
+    properties_generated: int = 0
+    transitions_count: int = 0
+    variables_count: int = 0
+
+
+class HealthReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    classification: HealthClassification
+    items: List[HealthCheckItem] = Field(default_factory=list)
+    coverage: HealthCoverage
+
+
 class SpecDraftResponse(BaseModel):
     model: ModelSpec
     properties: List[PropertySpec] = Field(..., max_length=MAX_PROPERTIES)
     assumptions: List[str] = Field(default_factory=list)
     review_log: List[ReviewLogItem] = Field(default_factory=list)
     used_llm: bool = False
+    # When `used_llm` is true, the OpenAI model name actually used. Surfaced
+    # so the UI can label provenance honestly ("Drafted by LLM: gpt-4o").
+    llm_model_name: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
+    health: Optional[HealthReport] = None
 
 
 class SpecReviewRequest(BaseModel):
@@ -261,6 +297,7 @@ class SpecReviewResponse(BaseModel):
     review_log: List[ReviewLogItem] = Field(default_factory=list)
     hypotheses: List[RiskHypothesis] = Field(default_factory=list)
     used_llm: bool = False
+    llm_model_name: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
 
 
@@ -286,3 +323,14 @@ class HypothesisCheckResult(BaseModel):
 
 class HypothesisCheckResponse(BaseModel):
     results: List[HypothesisCheckResult] = Field(default_factory=list)
+
+
+class ClarifyRequest(BaseModel):
+    description: str = Field(..., min_length=0, max_length=8000)
+    health_items: List[HealthCheckItem] = Field(default_factory=list)
+
+
+class ClarifyResponse(BaseModel):
+    questions: List[str] = Field(default_factory=list)
+    suggested_rewrite: Optional[str] = None
+    used_llm: bool = False

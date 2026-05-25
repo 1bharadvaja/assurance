@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AIDraftView } from "./AIDraftView";
 import { AIReviewLog } from "./AIReviewLog";
+import { ClarificationPanel } from "./ClarificationPanel";
 import { DraftEditPanel } from "./DraftEditPanel";
 import { FormalCheckProgress, type ProgressEvent } from "./FormalCheckProgress";
 import {
@@ -16,19 +17,21 @@ import { SpecIntentInput } from "./SpecIntentInput";
 import {
   applyRepair as applyRepairApi,
   checkHypotheses,
+  clarifyDescription,
   draftSpec,
+  DraftBlockedError,
   isDemoMode,
   reviewSpec,
   verify as verifyApi,
 } from "../lib/api";
 import type {
+  ClarifyResponse,
   HypothesisCheckResponse,
   HypothesisCheckResult,
   ModelSpec,
   RegressionEntry,
   SpecDraftResponse,
   SpecReviewResponse,
-  VerifyResponse,
 } from "../lib/types";
 import {
   type TransitionEdit,
@@ -77,6 +80,14 @@ export function ReviewPipeline() {
   const [isChecking, setIsChecking] = useState(false);
   const [progress, setProgress] = useState<ProgressEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  // Clarification flow state. The panel only appears once the user
+  // explicitly asks for it (or when the backend rejects review with a
+  // blocked-draft error).
+  const [clarify, setClarify] = useState<ClarifyResponse | null>(null);
+  const [clarifyLoading, setClarifyLoading] = useState(false);
+  const [clarifyError, setClarifyError] = useState<string | null>(null);
+  const [clarifyOpen, setClarifyOpen] = useState(false);
 
   // Track which model and hypothesis set the current review and check
   // belong to. If the user edits the model after running review/check,
@@ -166,6 +177,9 @@ export function ReviewPipeline() {
     setPostRepair({});
     setReviewedModelSig(null);
     setCheckedModelSig(null);
+    setClarify(null);
+    setClarifyError(null);
+    setClarifyOpen(false);
     try {
       const resp = await draftSpec({ description });
       setDraft(resp);
@@ -177,6 +191,44 @@ export function ReviewPipeline() {
     } finally {
       setIsDrafting(false);
     }
+  }
+
+  async function onAskClarification() {
+    setClarifyOpen(true);
+    setClarifyLoading(true);
+    setClarifyError(null);
+    setClarify(null);
+    try {
+      const resp = await clarifyDescription({
+        description,
+        health_items: draft?.health?.items ?? [],
+      });
+      setClarify(resp);
+    } catch (err) {
+      setClarifyError((err as Error).message);
+    } finally {
+      setClarifyLoading(false);
+    }
+  }
+
+  function onApplyRewrite(rewrite: string) {
+    setDescription(rewrite);
+    setClarifyOpen(false);
+    setClarify(null);
+    scrollToStage(1);
+  }
+
+  function onUseExample() {
+    setClarifyOpen(false);
+    setClarify(null);
+    scrollToStage(1);
+  }
+
+  function onFixDraft() {
+    // The transition editor lives behind a disclosure on Stage 2; we
+    // can't auto-open it from here, but jumping to Stage 2 puts the
+    // user in the right place.
+    scrollToStage(2);
   }
 
   async function onAcceptDraft() {
@@ -198,7 +250,17 @@ export function ReviewPipeline() {
       setStage(3);
       setTimeout(() => scrollToStage(3), 60);
     } catch (err) {
-      setError((err as Error).message);
+      if (err instanceof DraftBlockedError) {
+        // The backend re-ran the health check and rejected the (edited)
+        // draft. Surface a short banner — the per-item details already
+        // live in the Stage 2 health panel.
+        setError(
+          "Draft blocked by validation. Fix the highlighted errors in Stage 2 before reviewing."
+        );
+        scrollToStage(2);
+      } else {
+        setError((err as Error).message);
+      }
     } finally {
       setIsReviewing(false);
     }
@@ -324,11 +386,11 @@ export function ReviewPipeline() {
           AI proposes. Z3 checks.
         </h2>
         <p className="mt-2 max-w-2xl text-[14px] leading-relaxed text-ink-600">
-          The reviewer drafts a state-machine model and a small set of safety
-          checks from your description, then proposes risk hypotheses. Z3
-          confirms or refutes each one by finding a concrete reachable trace.
-          The review log is not a proof; the solver is the source of truth
-          for reachability.
+          AI drafts a state-machine model and safety checks from your
+          description. <strong>Drafts are untrusted until they pass
+          validation.</strong> Z3 only checks validated finite-state
+          models. If validation fails, the app asks for clarification
+          instead of pretending the model is formal.
         </p>
         {isDemoMode() && (
           <div className="mt-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
@@ -397,31 +459,50 @@ export function ReviewPipeline() {
               description.
             </p>
           ) : activeModel ? (
-            <AIDraftView
-              usedLlm={draft.used_llm}
-              warnings={draft.warnings}
-              model={activeModel}
-              properties={draft.properties}
-              assumptions={draft.assumptions}
-              hasEdits={hasEdits}
-              isReviewing={isReviewing}
-              onAccept={onAcceptDraft}
-              acceptLabel={review ? "Re-run review" : "Accept draft and review weak points"}
-              showAcceptButton
-              editPanel={
-                <DraftEditPanel
-                  baseModel={draft.model}
-                  selected={editorTransition}
-                  onSelectedChange={setEditorTransition}
-                  edits={edits}
-                  onChange={(t, edit) =>
-                    setEdits((cur) => ({ ...cur, [t]: edit }))
-                  }
-                  onResetTransition={resetTransition}
-                  onResetAll={() => setEdits({})}
-                />
-              }
-            />
+            <>
+              <AIDraftView
+                usedLlm={draft.used_llm}
+                llmModelName={draft.llm_model_name}
+                warnings={draft.warnings}
+                model={activeModel}
+                properties={draft.properties}
+                assumptions={draft.assumptions}
+                hasEdits={hasEdits}
+                isReviewing={isReviewing}
+                onAccept={onAcceptDraft}
+                acceptLabel={review ? "Re-run review" : "Accept draft and review weak points"}
+                showAcceptButton
+                health={draft.health}
+                onAskClarification={onAskClarification}
+                onFixDraft={onFixDraft}
+                onUseExample={onUseExample}
+                editPanel={
+                  <DraftEditPanel
+                    baseModel={draft.model}
+                    selected={editorTransition}
+                    onSelectedChange={setEditorTransition}
+                    edits={edits}
+                    onChange={(t, edit) =>
+                      setEdits((cur) => ({ ...cur, [t]: edit }))
+                    }
+                    onResetTransition={resetTransition}
+                    onResetAll={() => setEdits({})}
+                  />
+                }
+              />
+              {clarifyOpen && (
+                <div className="mt-4">
+                  <ClarificationPanel
+                    result={clarify}
+                    loading={clarifyLoading}
+                    error={clarifyError}
+                    onAsk={onAskClarification}
+                    onApplyRewrite={onApplyRewrite}
+                    onUseExample={onUseExample}
+                  />
+                </div>
+              )}
+            </>
           ) : null}
         </PipelineStageCard>
       </div>
@@ -430,7 +511,13 @@ export function ReviewPipeline() {
         <PipelineStageCard
           step={3}
           title="AI review log"
-          caption={review ? (review.used_llm ? "from LLM" : "deterministic") : ""}
+          caption={
+            review
+              ? review.used_llm
+                ? `from LLM${review.llm_model_name ? `: ${review.llm_model_name}` : ""}`
+                : "deterministic"
+              : ""
+          }
           state={stageState(3)}
         >
           {!review ? (

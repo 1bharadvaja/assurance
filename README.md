@@ -138,9 +138,43 @@ pydantic schema, with audit-log entries instead of private reasoning.
 If the response fails validation we fall back to the deterministic
 reviewer and surface a warning in the response.
 
+**Strongly recommended:** point `ASSURANCE_LLM_MODEL` at the strongest
+reasoning model available to your account (e.g. `gpt-4o`,
+`gpt-4.1`, or a later frontier model). The Review Pipeline asks the
+LLM to draft a full finite-state model plus environment transitions
+plus safety properties in one pass — smaller models routinely
+under-model the environment (e.g. declaring `train_detected` without
+emitting a `detect_train` transition). The model health check catches
+the worst of these (see *Input / event reachability* below) but a
+stronger model produces cleaner first drafts. The frontend surfaces
+the model name as part of the provenance badge ("Drafted by LLM:
+gpt-4.1") so you can tell which model produced any given artifact.
+
 Leave the key unset and you'll get the deterministic field-robot /
-warehouse-robot templates — enough for the demo to be reproducible
-without any external service.
+warehouse-robot / railway-crossing templates — enough for the demo to
+be reproducible without any external service.
+
+### Model health check
+
+Every draft (LLM-produced or deterministic) is run through a structured
+set of checks before the user can hand it to the reviewer or to Z3:
+
+| Check | What it catches |
+| --- | --- |
+| Model size limits | Drafts that exceed the structural caps. |
+| Guard syntax | Expressions outside the allowed grammar. |
+| Referenced symbols | Names that aren't declared variables, enum values, or bool keywords. |
+| Enum / boolean misuse | `Filling == false` patterns where `Filling` is a mode value, not a bool. |
+| Transition effects | Empty guards or transitions with no `updates`. |
+| Vacuous properties | `var == A and var == B` where A and B are distinct. |
+| Mixed and / or parentheses | Ambiguous precedence without explicit grouping. |
+| **Input / event reachability** | Bool variables used in guards/properties but never updated to the required state by any transition (the most common LLM under-modeling failure). |
+| Requirement coverage | Description sentences that didn't map to any property. |
+
+If any check is an `error`, the draft is *blocked* — `/api/review-pipeline/review`
+returns HTTP 400 with a structured `draft_blocked_by_health_check` detail.
+Warnings classify the draft as `checkable_with_warnings`; the user can
+still send it to Z3 but the UI surfaces the warnings inline.
 
 ## 5. Playground
 

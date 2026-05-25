@@ -3,11 +3,18 @@
 import clsx from "clsx";
 import { Loader2 } from "lucide-react";
 import { Disclosure } from "./Disclosure";
-import type { ModelSpec, PropertySpec } from "../lib/types";
+import { ModelHealthCheck } from "./ModelHealthCheck";
+import type {
+  HealthReport,
+  ModelSpec,
+  PropertySpec,
+} from "../lib/types";
 
 interface Props {
   /** Original AI-drafted response — used for the provenance badge. */
   usedLlm: boolean;
+  /** OpenAI model that produced the draft, if any. */
+  llmModelName?: string | null;
   warnings: string[];
   /** Current working model (draft + any edits). */
   model: ModelSpec;
@@ -21,10 +28,19 @@ interface Props {
   showAcceptButton: boolean;
   /** Optional editor slot rendered inside a disclosure on this card. */
   editPanel?: React.ReactNode;
+  /** Model health check from the backend (may be null for older payloads). */
+  health?: HealthReport | null;
+  /** Called when the user wants clarifying questions for a blocked draft. */
+  onAskClarification?: () => void;
+  /** Called when the user wants to start over from an example. */
+  onUseExample?: () => void;
+  /** Called when the user wants to jump to the transition editor. */
+  onFixDraft?: () => void;
 }
 
 export function AIDraftView({
   usedLlm,
+  llmModelName,
   warnings,
   model,
   properties,
@@ -35,13 +51,75 @@ export function AIDraftView({
   acceptLabel,
   showAcceptButton,
   editPanel,
+  health,
+  onAskClarification,
+  onUseExample,
+  onFixDraft,
 }: Props) {
   const modes = (model.variables.mode?.values ?? []) as string[];
   const otherVars = Object.entries(model.variables).filter(([k]) => k !== "mode");
+  const blocked = health?.classification === "blocked";
+  const withWarnings = health?.classification === "checkable_with_warnings";
 
   return (
     <div className="space-y-4">
-      <ProvenanceBadge usedLlm={usedLlm} warnings={warnings} hasEdits={hasEdits} />
+      <ProvenanceBadge
+        usedLlm={usedLlm}
+        llmModelName={llmModelName}
+        warnings={warnings}
+        hasEdits={hasEdits}
+      />
+
+      {health && <ModelHealthCheck report={health} />}
+
+      {blocked && (
+        <div className="rounded border border-red-200 bg-red-50 px-3 py-2.5 text-[12.5px] text-red-900">
+          <div className="font-medium">
+            Draft blocked by validation — review and Z3 are disabled
+          </div>
+          <p className="mt-1 leading-snug">
+            The formal checker requires this draft to be cleaned up first.
+            Pick one:
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {onFixDraft && (
+              <button
+                type="button"
+                onClick={onFixDraft}
+                className="rounded border border-red-300 bg-paper px-2.5 py-1 text-[12px] text-red-900 transition hover:bg-red-100"
+              >
+                Fix draft
+              </button>
+            )}
+            {onAskClarification && (
+              <button
+                type="button"
+                onClick={onAskClarification}
+                className="rounded border border-red-300 bg-paper px-2.5 py-1 text-[12px] text-red-900 transition hover:bg-red-100"
+              >
+                Ask clarification
+              </button>
+            )}
+            {onUseExample && (
+              <button
+                type="button"
+                onClick={onUseExample}
+                className="rounded border border-red-300 bg-paper px-2.5 py-1 text-[12px] text-red-900 transition hover:bg-red-100"
+              >
+                Use an example
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {withWarnings && (
+        <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
+          This draft is checkable, but some modeling assumptions may be
+          wrong — review the warnings above before sending hypotheses to
+          Z3.
+        </div>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2">
         <section>
@@ -147,9 +225,17 @@ export function AIDraftView({
           <button
             type="button"
             onClick={onAccept}
-            disabled={isReviewing}
+            disabled={isReviewing || blocked}
+            title={
+              blocked
+                ? "Fix the validation errors above before reviewing this draft."
+                : undefined
+            }
             className={clsx(
-              "inline-flex items-center gap-2 rounded-md border border-accent bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white transition hover:bg-accent-dark disabled:cursor-wait disabled:opacity-70"
+              "inline-flex items-center gap-2 rounded-md border px-3.5 py-1.5 text-[13px] font-medium transition",
+              blocked
+                ? "border-ink-200 bg-ink-100 text-ink-400 cursor-not-allowed"
+                : "border-accent bg-accent text-white hover:bg-accent-dark disabled:cursor-wait disabled:opacity-70"
             )}
           >
             {isReviewing && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -165,14 +251,20 @@ export function AIDraftView({
 
 function ProvenanceBadge({
   usedLlm,
+  llmModelName,
   warnings,
   hasEdits,
 }: {
   usedLlm: boolean;
+  llmModelName?: string | null;
   warnings: string[];
   hasEdits: boolean;
 }) {
-  const baseLabel = usedLlm ? "Drafted by LLM" : "Drafted by deterministic reviewer";
+  const baseLabel = usedLlm
+    ? llmModelName
+      ? `Drafted by LLM: ${llmModelName}`
+      : "Drafted by LLM"
+    : "Drafted by deterministic reviewer";
   return (
     <div
       className={clsx(
@@ -182,10 +274,10 @@ function ProvenanceBadge({
           : "border-amber-200 bg-amber-50 text-amber-900"
       )}
     >
-      <div className="font-medium">
-        {baseLabel}
+      <div className="flex flex-wrap items-baseline gap-2 font-medium">
+        <span>{baseLabel}</span>
         {hasEdits && (
-          <span className="ml-2 rounded bg-ink-900/10 px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wider">
+          <span className="rounded bg-ink-900/10 px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wider">
             edited
           </span>
         )}

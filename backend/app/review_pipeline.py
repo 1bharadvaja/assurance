@@ -25,10 +25,13 @@ from .counterexample import find_culprit
 from .diff import diff_results
 from .explain import explain_failure
 from .guards import parse_guard
+from .health_check import run_health_check
 from .property_lint import lint_property
 from .models import (
     AssuranceDiffResponse,
     CandidateMutation,
+    ClarifyRequest,
+    ClarifyResponse,
     HypothesisCheckRequest,
     HypothesisCheckResponse,
     HypothesisCheckResult,
@@ -65,6 +68,9 @@ def draft_from_description(req: SpecDraftRequest) -> SpecDraftResponse:
             llm_result.warnings = list(llm_result.warnings) + _collect_property_lints(
                 llm_result.properties
             )
+            llm_result.health = run_health_check(
+                llm_result.model, llm_result.properties, req.description
+            )
             return llm_result
         warnings.append(
             "OpenAI call did not return a valid model"
@@ -73,11 +79,24 @@ def draft_from_description(req: SpecDraftRequest) -> SpecDraftResponse:
         )
     resp = _deterministic_draft(req, warnings=warnings)
     resp.warnings = list(resp.warnings) + _collect_property_lints(resp.properties)
+    resp.health = run_health_check(resp.model, resp.properties, req.description)
     return resp
 
 
 def review_model(req: SpecReviewRequest) -> SpecReviewResponse:
     warnings: List[str] = []
+    # Hard gate: if the model has structural errors, refuse to review.
+    # The endpoint translates this to HTTP 400 with the failing items.
+    health = run_health_check(req.model, req.properties, req.description or "")
+    if health.classification == "blocked":
+        errors = [i for i in health.items if i.severity == "error"]
+        msg = "; ".join(f"{i.title}: {i.message}" for i in errors[:3])
+        raise BlockedDraftError(
+            "Draft is blocked by the model health check and cannot be reviewed: "
+            + msg,
+            items=errors,
+        )
+
     if _have_llm():
         llm_result, llm_err = _llm_review(req)
         if llm_result is not None:
@@ -250,6 +269,178 @@ def _have_llm() -> bool:
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
+# Default LLM model. Kept conservative so the deployed demo doesn't depend on
+# preview/frontier model availability. The README recommends overriding this
+# with a stronger reasoning model for the Review Pipeline.
+_DEFAULT_LLM_MODEL = "gpt-4o-mini"
+
+
+def _llm_model_name() -> str:
+    return os.getenv("ASSURANCE_LLM_MODEL", _DEFAULT_LLM_MODEL)
+
+
+class BlockedDraftError(Exception):
+    """Raised by review_model when the draft fails the health check."""
+
+    def __init__(self, msg: str, items: list):
+        super().__init__(msg)
+        self.items = items
+
+
+# ---------------------------------------------------------------------------
+# Clarification
+# ---------------------------------------------------------------------------
+
+
+def clarify_description(req: ClarifyRequest) -> ClarifyResponse:
+    """Return 2–4 concrete clarifying questions for a vague or blocked draft."""
+    errors = [i for i in req.health_items if i.severity == "error"]
+    questions = _deterministic_questions(req.description, errors)
+    suggested_rewrite: Optional[str] = None
+
+    if _have_llm():
+        try:
+            llm_q, llm_rewrite = _llm_clarify(req)
+            if llm_q:
+                return ClarifyResponse(
+                    questions=llm_q[:4],
+                    suggested_rewrite=llm_rewrite,
+                    used_llm=True,
+                )
+        except Exception:
+            pass
+    return ClarifyResponse(
+        questions=questions,
+        suggested_rewrite=suggested_rewrite,
+        used_llm=False,
+    )
+
+
+def _deterministic_questions(description: str, errors: list) -> List[str]:
+    """Hand-written fallback clarifying questions."""
+    qs: List[str] = []
+    desc = (description or "").lower()
+    if errors:
+        qs.append(
+            "What does each clause in the description map to? "
+            "List the controller's modes, the boolean / enum conditions, "
+            "and what each transition is supposed to do."
+        )
+    if "mode" not in desc and "state" not in desc:
+        qs.append("What are the controller's modes (e.g. Idle, Active, Fault)?")
+    if not any(k in desc for k in ("must", "should", "never", "only", "within")):
+        qs.append(
+            "What is the controller NOT allowed to do? "
+            "Phrase the rule as a sentence with `must`, `must not`, "
+            "`never`, or `within`."
+        )
+    if not any(
+        k in desc
+        for k in (
+            "danger",
+            "irreversible",
+            "actuate",
+            "fire",
+            "open",
+            "heat",
+            "move",
+            "load",
+        )
+    ):
+        qs.append(
+            "Which mode represents the dangerous or irreversible action? "
+            "(e.g. Actuate, Heating, Moving.)"
+        )
+    if not any(
+        k in desc
+        for k in (
+            "emergency",
+            "recovery",
+            "safe",
+            "shutdown",
+            "stop",
+            "abort",
+            "fault",
+        )
+    ):
+        qs.append(
+            "What state counts as recovery / shutdown? "
+            "(e.g. EmergencyStop, Venting, SafeMode.)"
+        )
+    if len(qs) < 2:
+        qs.append(
+            "Should the safety rule be expressed as an invariant "
+            "(`mode == X must never coexist with Y`) or as a bounded response "
+            "(`if condition X holds, the controller must reach state Y within "
+            "N steps`)?"
+        )
+    return qs[:4]
+
+
+_CLARIFY_PROMPT = """\
+You are helping a user describe a small discrete controller for a formal
+model checker. The user's description was insufficient: it either failed
+validation or is too vague.
+
+Return ONLY a JSON object of the form:
+
+{
+  "questions": ["...", "...", "...", "..."],
+  "suggested_rewrite": null OR "a tightened rewrite of the description that
+    fixes the issues, in 2-4 sentences."
+}
+
+Rules for questions:
+- 2-4 questions, each concrete and answerable in one sentence.
+- Ask about modes, the dangerous / irreversible state, the recovery state,
+  the safety rule's structure (invariant vs bounded response), and any
+  specific conditions referenced by the validator.
+- Do NOT include chain-of-thought.
+"""
+
+
+def _llm_clarify(req: ClarifyRequest) -> tuple[List[str], Optional[str]]:
+    from openai import OpenAI  # type: ignore
+
+    client = OpenAI()
+    err_lines = [
+        f"- [{i.category}] {i.title}: {i.message}"
+        for i in req.health_items
+        if i.severity == "error"
+    ]
+    warn_lines = [
+        f"- [{i.category}] {i.title}: {i.message}"
+        for i in req.health_items
+        if i.severity == "warning"
+    ]
+    msg = (
+        "Original description:\n"
+        + (req.description or "(empty)")
+        + ("\n\nHealth check errors:\n" + "\n".join(err_lines) if err_lines else "")
+        + (
+            "\n\nHealth check warnings:\n" + "\n".join(warn_lines)
+            if warn_lines
+            else ""
+        )
+    )
+    resp = client.chat.completions.create(
+        model=_llm_model_name(),
+        messages=[
+            {"role": "system", "content": _CLARIFY_PROMPT},
+            {"role": "user", "content": msg},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+    raw = resp.choices[0].message.content or "{}"
+    data = json.loads(raw)
+    questions = list(data.get("questions") or [])
+    suggested = data.get("suggested_rewrite")
+    if suggested and not isinstance(suggested, str):
+        suggested = None
+    return questions, suggested
+
+
 _SYSTEM_PROMPT = """\
 You are drafting a small finite state-machine model for a formal model
 checker. Return ONLY a JSON object that matches the example shape below
@@ -300,19 +491,54 @@ CRITICAL — PROPERTY WELL-FORMEDNESS:
   `mode == Heating and temperature_sensor_agreement == false`,
   response `mode == EmergencyShutdown`, bound 1 or 2.
 
-CRITICAL — REACHABILITY. The solver can only find a counterexample if the
-critical state (e.g. Actuate, Loading) is *reachable* from the initial
-state under the drafted transitions. That means you MUST include the
-environment / operator transitions that get the system there:
-- A transition that grants operator approval when it is currently false.
-- A transition that drops communications when they are currently OK.
-- A transition that drains the battery from High to Low.
-- A transition that flips sensor agreement.
-- The reactive transitions implied by the description (e.g. comms_degrade,
-  low_battery_recovery).
-Without these, the model is "stuck" and the safety check looks vacuously
-satisfied even though the situation it describes is never actually
-reachable. Always include them.
+CRITICAL — INPUT / EVENT REACHABILITY. Every boolean input variable that
+appears in any guard, condition, trigger, or response MUST have at least
+one transition that can flip it to the value the guard requires.
+
+Concretely:
+- If a guard says `train_detected == true` and `train_detected` is
+  initialized `false`, you MUST also emit a transition (e.g.
+  `detect_train`) whose updates set `train_detected: true`.
+- If a guard says `lid_locked == false` and `lid_locked` is initialized
+  `true`, you MUST also emit a transition (e.g. `unlock_lid`) whose
+  updates set `lid_locked: false`.
+- This rule applies regardless of how natural-sounding the name is.
+  Variables named after sensors, faults, detections, operator actions,
+  or environment events are inputs to the controller — the model needs
+  explicit transitions to flip them, even if the description does not
+  spell that out.
+
+A bounded-response property is only meaningful if the trigger can become
+true. If the trigger references a bool input, that input MUST have an
+updater that can drive it to the triggering value.
+
+Domain checklist (use the right set for the user's system):
+
+Railway / train crossing:
+- detect_train: train_detected == false → train_detected = true
+- gate_sensor_fails: gate_sensor_fault == false → gate_sensor_fault = true
+- train_clears: mode == TrainPassing → train_cleared = true
+
+Chemical tank / vessel:
+- pressure_rises: pressure == Normal → pressure = High
+- pressure_normalizes: pressure == High → pressure = Normal
+- lid_unlocks: lid_locked == true → lid_locked = false
+- temperature_sensor_disagrees: temperature_sensor_agreement == true →
+  temperature_sensor_agreement = false
+
+Robot / autonomy:
+- comms_loss: comms == OK → comms = Lost
+- comms_restore: comms == Lost → comms = OK
+- battery_drain: battery == High → battery = Low
+- sensor_disagree: sensor_agreement == true → sensor_agreement = false
+- operator_authorize: human_authorized == false → human_authorized = true
+
+Reactive transitions (`reactive: true`) implied by the description
+(e.g. `low_battery_recovery`, `comms_degrade`) must also be present —
+they are how the controller responds to the environment events above.
+
+If you omit these transitions, the model is "stuck" and every safety
+check looks vacuously satisfied. Always include them.
 
 EXAMPLE (illustrative — adapt to the user's description):
 {
@@ -482,7 +708,7 @@ def _llm_draft(
 
         client = OpenAI()
         resp = client.chat.completions.create(
-            model=os.getenv("ASSURANCE_LLM_MODEL", "gpt-4o-mini"),
+            model=_llm_model_name(),
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {
@@ -506,6 +732,7 @@ def _llm_draft(
                 "assumptions": data.get("assumptions", []),
                 "review_log": data.get("review_log", []),
                 "used_llm": True,
+                "llm_model_name": _llm_model_name(),
                 "warnings": [],
             }
         )
@@ -537,7 +764,7 @@ def _llm_review(
         if req.description:
             user_msg += f"\n\nOriginal description:\n{req.description}"
         resp = client.chat.completions.create(
-            model=os.getenv("ASSURANCE_LLM_MODEL", "gpt-4o-mini"),
+            model=_llm_model_name(),
             messages=[
                 {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
@@ -552,6 +779,7 @@ def _llm_review(
                 "review_log": data.get("review_log", []),
                 "hypotheses": data.get("hypotheses", []),
                 "used_llm": True,
+                "llm_model_name": _llm_model_name(),
                 "warnings": [],
             }
         )
@@ -582,6 +810,8 @@ def _deterministic_draft(
     kind = _classify_description(req.description, req.domain_hint)
     if kind == "warehouse_robot":
         model, properties, assumptions, review_log = _warehouse_robot_draft()
+    elif kind == "railway_crossing":
+        model, properties, assumptions, review_log = _railway_crossing_draft()
     else:
         model, properties, assumptions, review_log = _field_robot_draft()
     note = "Using deterministic demo reviewer. Set OPENAI_API_KEY to enable AI drafting."
@@ -615,6 +845,19 @@ def _deterministic_review(
 
 def _classify_description(desc: str, hint: Optional[str]) -> str:
     blob = (desc + " " + (hint or "")).lower()
+    if any(
+        k in blob
+        for k in (
+            "railway",
+            "railroad",
+            "train crossing",
+            "level crossing",
+            "trainpassing",
+            "warning lights",
+            "gate sensor",
+        )
+    ):
+        return "railway_crossing"
     if any(k in blob for k in ["warehouse robot", "warehouse", "pallet", "loading dock"]):
         return "warehouse_robot"
     return "field_robot"
@@ -941,6 +1184,231 @@ def _warehouse_robot_draft():
 
 
 # ---------------------------------------------------------------------------
+# Railway crossing deterministic model
+# ---------------------------------------------------------------------------
+
+
+def _railway_crossing_draft():
+    # Design note: mode transitions and the sensor booleans are deliberately
+    # decoupled so that removing a precondition on `enter_train_passing`
+    # produces a real reachable counterexample rather than a vacuous
+    # no-op. Specifically `gate_reaches_down` only updates mode; the
+    # separate environment event `gate_sensor_confirms_down` is what flips
+    # `gate_fully_down`. Similarly `enter_fault` is non-reactive — the
+    # bounded-response property below is the safety obligation, so the
+    # solver can choose adversarial traces where the controller delays
+    # entering Fault.
+    model = ModelSpec(
+        name="railway_crossing",
+        title="Railway crossing controller",
+        description=(
+            "Railway crossing controller. When a train is detected, the "
+            "controller turns on warning lights, lowers the gate, and only "
+            "allows TrainPassing once the gate is fully down. A gate-sensor "
+            "fault drives the controller into Fault and blocks TrainPassing."
+        ),
+        variables={
+            "mode": VariableSpec(
+                type="enum",
+                values=[
+                    "Idle",
+                    "Warning",
+                    "LoweringGate",
+                    "GateDown",
+                    "TrainPassing",
+                    "RaisingGate",
+                    "Fault",
+                ],
+                initial="Idle",
+            ),
+            "train_detected": VariableSpec(type="bool", initial=False),
+            "gate_sensor_fault": VariableSpec(type="bool", initial=False),
+            "warning_lights_active": VariableSpec(type="bool", initial=False),
+            "gate_fully_down": VariableSpec(type="bool", initial=False),
+            "train_cleared": VariableSpec(type="bool", initial=False),
+        },
+        transitions=[
+            # ----- Reactive safety / controller chain ---------------------
+            # File order matters: enter_fault is highest priority so it
+            # always pre-empts the normal chain when a fault is reported.
+            TransitionSpec(
+                name="enter_fault",
+                reactive=True,
+                guard="gate_sensor_fault == true and mode != Fault",
+                updates={"mode": "Fault"},
+            ),
+            # Once a train is detected while Idle, the controller is
+            # obligated to start the warning sequence. Reactive so the
+            # bounded-response below has a deterministic path to
+            # GateDown.
+            TransitionSpec(
+                name="train_detected_warning",
+                reactive=True,
+                guard="train_detected == true and mode == Idle",
+                updates={"mode": "Warning", "warning_lights_active": True},
+            ),
+            TransitionSpec(
+                name="lower_gate",
+                reactive=True,
+                guard="mode == Warning and warning_lights_active == true",
+                updates={"mode": "LoweringGate"},
+            ),
+            # NOTE: only updates mode. `gate_fully_down` is set separately
+            # by `gate_sensor_confirms_down`; decoupling them is what
+            # makes `gate_fully_down == true` a meaningful precondition
+            # on enter_train_passing.
+            TransitionSpec(
+                name="gate_reaches_down",
+                reactive=True,
+                guard="mode == LoweringGate",
+                updates={"mode": "GateDown"},
+            ),
+
+            # ----- Environment / sensor events ----------------------------
+            TransitionSpec(
+                name="detect_train",
+                guard="train_detected == false",
+                updates={"train_detected": True},
+            ),
+            TransitionSpec(
+                name="gate_sensor_fails",
+                guard="gate_sensor_fault == false",
+                updates={"gate_sensor_fault": True},
+            ),
+            # The gate-down sensor reports gate-fully-down asynchronously.
+            # Independent of mode so the solver can explore "mode reaches
+            # GateDown before sensor confirms" as a real failure mode.
+            TransitionSpec(
+                name="gate_sensor_confirms_down",
+                guard="gate_fully_down == false",
+                updates={"gate_fully_down": True},
+            ),
+
+            # ----- Train-passing chain (operator-discretion) --------------
+            TransitionSpec(
+                name="enter_train_passing",
+                guard=(
+                    "mode == GateDown and gate_fully_down == true and "
+                    "warning_lights_active == true and gate_sensor_fault == false"
+                ),
+                updates={"mode": "TrainPassing"},
+            ),
+            TransitionSpec(
+                name="train_clears",
+                guard="mode == TrainPassing and train_cleared == false",
+                updates={"train_cleared": True},
+            ),
+            TransitionSpec(
+                name="raise_gate",
+                guard="mode == TrainPassing and train_cleared == true",
+                updates={"mode": "RaisingGate"},
+            ),
+            TransitionSpec(
+                name="return_to_idle",
+                guard="mode == RaisingGate",
+                updates={
+                    "mode": "Idle",
+                    "train_detected": False,
+                    "warning_lights_active": False,
+                    "gate_fully_down": False,
+                    "train_cleared": False,
+                },
+            ),
+        ],
+    )
+    properties = [
+        PropertySpec(
+            name="no_pass_without_gate_down",
+            title="Gate must be down before TrainPassing",
+            description=(
+                "A train must not enter TrainPassing while the gate is "
+                "not fully down."
+            ),
+            type="invariant",
+            condition="not (mode == TrainPassing and gate_fully_down == false)",
+        ),
+        PropertySpec(
+            name="no_pass_without_warning_lights",
+            title="Warning lights must be active during TrainPassing",
+            description="A train must not enter TrainPassing while warning lights are inactive.",
+            type="invariant",
+            condition="not (mode == TrainPassing and warning_lights_active == false)",
+        ),
+        PropertySpec(
+            name="warning_lights_during_lowering",
+            title="Warning lights active while LoweringGate",
+            description="Warning lights must be on while the gate is being lowered.",
+            type="invariant",
+            condition="not (mode == LoweringGate and warning_lights_active == false)",
+        ),
+        PropertySpec(
+            name="train_detection_reaches_gate_down",
+            title="Train detection → GateDown (or Fault) within three steps",
+            description=(
+                "Once a train is detected while Idle, the controller must "
+                "either reach GateDown within three steps or enter Fault "
+                "if the gate-sensor fails along the way."
+            ),
+            type="bounded_response",
+            trigger="train_detected == true and mode == Idle",
+            response="mode == GateDown or mode == Fault",
+            bound=3,
+        ),
+        PropertySpec(
+            name="sensor_fault_reaches_fault_mode",
+            title="Sensor fault → Fault within two steps",
+            description=(
+                "Once a gate-sensor fault is reported, the controller must "
+                "reach Fault within two steps. Disabling the recovery "
+                "transition is the canonical way to break this obligation."
+            ),
+            type="bounded_response",
+            trigger="gate_sensor_fault == true and mode != Fault",
+            response="mode == Fault",
+            bound=2,
+        ),
+    ]
+    assumptions = [
+        "Train detection and gate-sensor faults are external events the controller observes.",
+        "Lowering the gate eventually completes; the controller observes this as `gate_fully_down`.",
+        "Operators / track-clear interlocks reset `train_detected`, `warning_lights_active`, and `gate_fully_down` when the controller returns to Idle.",
+    ]
+    review_log = [
+        ReviewLogItem(
+            title="Critical-action state",
+            summary="Identified `TrainPassing` as the irreversible-while-active mode.",
+            evidence=[
+                "The description says a train must not enter TrainPassing without the gate fully down."
+            ],
+        ),
+        ReviewLogItem(
+            title="Environment events",
+            summary=(
+                "Added `detect_train` and `gate_sensor_fails` so the train-detection "
+                "and sensor-fault paths are reachable. Without them, every safety "
+                "check on TrainPassing would be vacuous."
+            ),
+            evidence=[
+                "Guard `train_detected == true` only fires after `detect_train` runs.",
+                "Guard `gate_sensor_fault == true` only fires after `gate_sensor_fails` runs.",
+            ],
+        ),
+        ReviewLogItem(
+            title="Recovery contract",
+            summary="`enter_fault` is reactive: the controller transitions to Fault as soon as a sensor fault is observed.",
+            evidence=["The description says a gate-sensor fault must drive the controller into Fault."],
+        ),
+        ReviewLogItem(
+            title="Bounded-response contract",
+            summary="Once a train is detected while Idle, the controller must reach GateDown within three steps.",
+            evidence=["The description says the controller should reach GateDown within three steps."],
+            generated_artifact="bounded_response(b=3): train_detected ⇒ mode == GateDown",
+        ),
+    ]
+    return model, properties, assumptions, review_log
+
+
+# ---------------------------------------------------------------------------
 # Deterministic hypothesis generation
 #
 # Hypotheses are *polarity-aware*. Transitions that drive the system into a
@@ -1168,22 +1636,30 @@ def _build_remove_clause_hypothesis(
         new_guard=new_guard,
         mutated_model=mutated,
     )
+    target_mode = trans.updates.get("mode") or "the post-state"
     return RiskHypothesis(
         id=f"hyp_{mutation_id}",
         title=f"Drop `{clause}` from `{trans.name}`",
         summary=(
-            f"If `{clause}` is removed from the guard on `{trans.name}`, the "
-            "critical mode may become reachable without that precondition. "
-            "Ask the solver to find such an execution."
+            f"`{trans.name}` enters `{target_mode}`. Dropping `{clause}` "
+            "checks whether the model can let the controller enter "
+            f"`{target_mode}` without that precondition. Z3 will either "
+            "find a reachable trace (confirming the clause was load-bearing) "
+            "or show no counterexample (the clause was redundant given other "
+            "structural constraints)."
         ),
         mutation=mutation,
         rationale=(
-            f"`{clause}` looks like an oversight predicate. The solver should "
-            "show whether removing it creates a reachable counterexample."
+            f"`{clause}` is a non-pre-state precondition on the transition "
+            f"into `{target_mode}`. If it is the only line of defence for "
+            "the associated safety property, removing it should expose a "
+            "concrete unsafe trace."
         ),
         expected_signal=(
-            "If a safety property fails, the trace will reach the critical "
-            "state through the weakened guard."
+            f"A safety invariant referencing `{target_mode}` together with "
+            f"the variable in `{clause}` is violated; the trace shows the "
+            "controller entering "
+            f"`{target_mode}` through the weakened guard."
         ),
     )
 
@@ -1203,21 +1679,25 @@ def _build_disable_hypothesis(
         kind="disable_transition",
         mutated_model=mutated,
     )
+    target_mode = trans.updates.get("mode") or "its recovery state"
     return RiskHypothesis(
         id=f"hyp_{mid}",
-        title=f"Disable reactive recovery `{trans.name}`",
+        title=f"Disable recovery transition `{trans.name}`",
         summary=(
-            f"If the reactive transition `{trans.name}` cannot fire, the "
-            "battery-recovery contract may be violated."
+            f"`{trans.name}` is the path the controller takes into "
+            f"`{target_mode}`. Removing it should violate any bounded-"
+            f"response property that requires the system to reach "
+            f"`{target_mode}` after a trigger event."
         ),
         mutation=mutation,
         rationale=(
-            f"`{trans.name}` is the only transition that handles battery "
-            "low while in flight. Disabling it should break the recovery "
-            "bounded-response property if one is defined."
+            f"`{trans.name}` updates `mode` to `{target_mode}`. If it is "
+            "the only transition that does so, disabling it leaves the "
+            "controller unable to discharge the safety obligation."
         ),
         expected_signal=(
-            "The Low Battery Recovery property fails because the response "
-            "state is no longer reachable in time."
+            f"A bounded-response check whose response is `mode == "
+            f"{target_mode}` fails because the response state is no longer "
+            "reachable in time."
         ),
     )

@@ -1,5 +1,8 @@
 import type {
   AssuranceDiffResponse,
+  ClarifyRequest,
+  ClarifyResponse,
+  HealthCheckItem,
   HypothesisCheckResponse,
   ModelSpec,
   PropertySpec,
@@ -60,6 +63,20 @@ export class BackendError extends Error {
   }
 }
 
+/**
+ * Thrown when the backend rejects a review request because the draft
+ * failed the model health check. Carries the structured error items so
+ * the UI can render the same rows it showed in Stage 2.
+ */
+export class DraftBlockedError extends BackendError {
+  readonly items: HealthCheckItem[];
+  constructor(message: string, items: HealthCheckItem[]) {
+    super(message, 400);
+    this.name = "DraftBlockedError";
+    this.items = items;
+  }
+}
+
 async function fetchCanned<T>(name: string): Promise<T> {
   const url = `${staticBasePath()}/canned/${name}`;
   const res = await fetch(url, { cache: "no-store" });
@@ -104,6 +121,29 @@ async function postLive<T>(path: string, body: unknown): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    // FastAPI surfaces structured 400s as { detail: { kind, message, items } }.
+    // The review endpoint uses kind=draft_blocked_by_health_check to signal
+    // that the model failed validation; surface that as a typed error so the
+    // UI can rerender the failing items inline instead of as a wall of text.
+    if (res.status === 400 && text) {
+      try {
+        const parsed = JSON.parse(text);
+        const detail = parsed?.detail;
+        if (
+          detail &&
+          typeof detail === "object" &&
+          detail.kind === "draft_blocked_by_health_check"
+        ) {
+          throw new DraftBlockedError(
+            detail.message || "Draft blocked by validation.",
+            (detail.items ?? []) as HealthCheckItem[]
+          );
+        }
+      } catch (parseErr) {
+        if (parseErr instanceof DraftBlockedError) throw parseErr;
+        // fall through to generic BackendError
+      }
+    }
     throw new BackendError(
       `${path} failed: HTTP ${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`,
       res.status
@@ -240,6 +280,17 @@ export function checkHypotheses(
     );
   }
   return postLive<HypothesisCheckResponse>("/api/review-pipeline/check", req);
+}
+
+export function clarifyDescription(
+  req: ClarifyRequest
+): Promise<ClarifyResponse> {
+  if (isDemoMode()) {
+    throw new BackendError(
+      "Clarification requires the live verifier backend."
+    );
+  }
+  return postLive<ClarifyResponse>("/api/review-pipeline/clarify", req);
 }
 
 // ---------------------------------------------------------------------------
