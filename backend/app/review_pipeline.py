@@ -58,12 +58,13 @@ from .verifier import Verifier
 def draft_from_description(req: SpecDraftRequest) -> SpecDraftResponse:
     warnings: List[str] = []
     if _have_llm():
-        llm_result = _llm_draft(req)
+        llm_result, llm_err = _llm_draft(req)
         if llm_result is not None:
             return llm_result
         warnings.append(
-            "OpenAI call did not return a valid model. Falling back to the "
-            "deterministic reviewer."
+            "OpenAI call did not return a valid model"
+            + (f" ({llm_err})" if llm_err else "")
+            + ". Falling back to the deterministic reviewer."
         )
     return _deterministic_draft(req, warnings=warnings)
 
@@ -71,12 +72,13 @@ def draft_from_description(req: SpecDraftRequest) -> SpecDraftResponse:
 def review_model(req: SpecReviewRequest) -> SpecReviewResponse:
     warnings: List[str] = []
     if _have_llm():
-        llm_result = _llm_review(req)
+        llm_result, llm_err = _llm_review(req)
         if llm_result is not None:
             return llm_result
         warnings.append(
-            "OpenAI call did not return a valid review. Falling back to the "
-            "deterministic reviewer."
+            "OpenAI call did not return a valid review"
+            + (f" ({llm_err})" if llm_err else "")
+            + ". Falling back to the deterministic reviewer."
         )
     return _deterministic_review(req, warnings=warnings)
 
@@ -183,28 +185,124 @@ def _have_llm() -> bool:
 
 _SYSTEM_PROMPT = """\
 You are drafting a small finite state-machine model for a formal model
-checker. Return ONLY a JSON object. Do not include chain-of-thought.
-Do include an audit log with concise externally-checkable observations and
-evidence, not private reasoning.
+checker. Return ONLY a JSON object that matches the example shape below
+EXACTLY. Do not include chain-of-thought. Do include an audit log with
+concise externally-checkable observations and evidence — not private
+reasoning.
 
-Constraints:
-- Variables are enum or bool only. Each variable has an `initial` value.
-- Guards use only this grammar: ==, !=, and, or, not, parentheses, the
-  literal `in [..]` list form, and the boolean keywords `true` / `false`.
-- Keep the model small: at most 10 variables, at most 25 transitions, at
-  most 10 properties.
-- Each property is either `invariant` (with a `condition`) or
-  `bounded_response` (with `trigger`, `response`, and an integer `bound`).
-- Do not claim anything is proven. The solver decides.
+ABSOLUTE FIELD NAMES (do not invent synonyms):
+- Top-level keys: "model", "properties", "assumptions", "review_log".
+- A model has: "name" (string), "title" (string, optional), "description"
+  (string, optional), "variables" (object), "transitions" (array).
+- THERE IS NO top-level "states" key. Modes live inside
+  variables.mode.values.
+- A variable is either {"type": "enum", "values": [..], "initial": "..."}
+  or {"type": "bool", "initial": true|false}.
+- A transition is {"name": "...", "guard": "...", "updates": {var: value}}.
+  Optional "reactive": true means the transition must fire whenever its
+  guard holds.
+- A property is either an invariant
+  {"name": "...", "title": "...", "type": "invariant", "condition": "..."}
+  or a bounded response
+  {"name": "...", "title": "...", "type": "bounded_response",
+   "trigger": "...", "response": "...", "bound": <int>}.
 
-Return shape (JSON):
+GUARDS use only: == != and or not parentheses, the literal `in [..]` list
+form, enum values written bare, and the boolean keywords `true` / `false`.
+No arithmetic, no function calls, no string literals.
+
+LIMITS: at most 10 variables, at most 25 transitions, at most 10
+properties. Do not claim anything is proven.
+
+CRITICAL — REACHABILITY. The solver can only find a counterexample if the
+critical state (e.g. Actuate, Loading) is *reachable* from the initial
+state under the drafted transitions. That means you MUST include the
+environment / operator transitions that get the system there:
+- A transition that grants operator approval when it is currently false.
+- A transition that drops communications when they are currently OK.
+- A transition that drains the battery from High to Low.
+- A transition that flips sensor agreement.
+- The reactive transitions implied by the description (e.g. comms_degrade,
+  low_battery_recovery).
+Without these, the model is "stuck" and the safety check looks vacuously
+satisfied even though the situation it describes is never actually
+reachable. Always include them.
+
+EXAMPLE (illustrative — adapt to the user's description):
 {
-  "model": ModelSpec,
-  "properties": [PropertySpec, ...],
-  "assumptions": ["plain text", ...],
+  "model": {
+    "name": "autonomous_field_robot",
+    "variables": {
+      "mode": {"type": "enum",
+               "values": ["Idle","Armed","Mission","DegradedComms","Recovery","EmergencyStop","Actuate"],
+               "initial": "Idle"},
+      "comms": {"type": "enum", "values": ["OK","Lost"], "initial": "OK"},
+      "battery": {"type": "enum", "values": ["High","Low"], "initial": "High"},
+      "human_authorized": {"type": "bool", "initial": false},
+      "sensor_agreement": {"type": "bool", "initial": true}
+    },
+    "transitions": [
+      {"name": "low_battery_recovery", "reactive": true,
+       "guard": "(mode == Mission or mode == DegradedComms) and battery == Low",
+       "updates": {"mode": "Recovery"}},
+      {"name": "comms_degrade", "reactive": true,
+       "guard": "mode == Mission and comms == Lost",
+       "updates": {"mode": "DegradedComms"}},
+      {"name": "arm",
+       "guard": "mode == Idle and human_authorized == true",
+       "updates": {"mode": "Armed"}},
+      {"name": "start_mission",
+       "guard": "mode == Armed and battery == High",
+       "updates": {"mode": "Mission"}},
+      {"name": "emergency_stop",
+       "guard": "mode == Recovery",
+       "updates": {"mode": "EmergencyStop"}},
+      {"name": "authorized_actuation",
+       "guard": "mode == DegradedComms and comms == Lost and human_authorized == true and sensor_agreement == true",
+       "updates": {"mode": "Actuate"}},
+      {"name": "operator_authorize",
+       "guard": "human_authorized == false and (mode == Idle or mode == Armed)",
+       "updates": {"human_authorized": true}},
+      {"name": "operator_revoke",
+       "guard": "human_authorized == true and (mode == Idle or mode == Armed)",
+       "updates": {"human_authorized": false}},
+      {"name": "comms_loss", "guard": "comms == OK", "updates": {"comms": "Lost"}},
+      {"name": "comms_restore", "guard": "comms == Lost", "updates": {"comms": "OK"}},
+      {"name": "battery_drain", "guard": "battery == High", "updates": {"battery": "Low"}},
+      {"name": "sensor_disagree",
+       "guard": "sensor_agreement == true and (mode == Idle or mode == Armed)",
+       "updates": {"sensor_agreement": false}},
+      {"name": "sensor_agree",
+       "guard": "sensor_agreement == false",
+       "updates": {"sensor_agreement": true}}
+    ]
+  },
+  "properties": [
+    {"name": "no_actuate_without_authority",
+     "title": "Human Oversight",
+     "type": "invariant",
+     "condition": "not (mode == Actuate and comms == Lost and human_authorized == false)"},
+    {"name": "no_actuate_on_sensor_disagreement",
+     "title": "Sensor Safety",
+     "type": "invariant",
+     "condition": "not (mode == Actuate and sensor_agreement == false)"},
+    {"name": "low_battery_recovers_within_2",
+     "title": "Low Battery Recovery",
+     "type": "bounded_response",
+     "trigger": "(mode == Mission or mode == DegradedComms) and battery == Low",
+     "response": "mode == Recovery or mode == EmergencyStop",
+     "bound": 2}
+  ],
+  "assumptions": [
+    "Operator approval is observable to the controller and can be granted or revoked while Idle or Armed."
+  ],
   "review_log": [
-    {"title": "...", "summary": "...", "evidence": ["...", ...]},
-    ...
+    {"title": "Critical action state",
+     "summary": "Identified Actuate as the irreversible command state.",
+     "evidence": ["The description says Actuate performs an irreversible command."]},
+    {"title": "Oversight predicate",
+     "summary": "Mapped human_authorized to the operator-approval predicate guarding actuation.",
+     "evidence": ["The description says actuation requires a human operator's approval."]}
   ]
 }
 """
@@ -212,43 +310,60 @@ Return shape (JSON):
 
 _REVIEW_SYSTEM_PROMPT = """\
 You are an auditor reviewing a finite state-machine model and its safety
-properties. Return ONLY a JSON object. Do not include chain-of-thought.
-Each review item must be a concise, externally-checkable observation with
-evidence drawn from the model — not private reasoning.
+properties. Return ONLY a JSON object matching the shape below EXACTLY.
+Do not include chain-of-thought. Each review item must be a concise,
+externally-checkable observation with evidence drawn from the model — not
+private reasoning.
 
-Constraints:
+Rules:
 - Do not claim a property holds or fails. The solver decides.
-- Each hypothesis must have either a `property` or a `mutation` (a small
-  edit to one transition's guard, or disabling a transition).
-- Mutations must produce a model that is still valid (≤10 vars, ≤25
-  transitions). The `mutated_model` field must contain the full model
-  with the edit applied.
+- Each hypothesis must have either a `property` (a PropertySpec, see
+  invariant / bounded_response shapes from the draft prompt) or a
+  `mutation`.
+- `mutated_model` must be the full ModelSpec with the edit already
+  applied (same shape as the input model, same field names: `name`,
+  `variables`, `transitions`).
+- Generate 1–4 hypotheses focused on transitions that enter a critical
+  state (e.g. Actuate, Moving near a human, Loading) whose guards
+  reference oversight predicates.
 
-Return shape (JSON):
+Shape (JSON):
 {
-  "review_log": [{"title": "...", "summary": "...", "evidence": ["..."]}],
+  "review_log": [
+    {"title": "...", "summary": "...", "evidence": ["..."]}
+  ],
   "hypotheses": [
     {
-      "id": "...",
+      "id": "hyp_<short_id>",
       "title": "...",
       "summary": "...",
       "rationale": "...",
       "expected_signal": "...",
-      "property": PropertySpec | null,
+      "property": null,
       "mutation": {
-        "id": "...", "title": "...", "transition": "...",
-        "kind": "remove_guard_clause" | "disable_transition" | "strengthen_or_weaken_guard",
-        "removed_clause": "..." | null,
-        "new_guard": "..." | null,
-        "mutated_model": ModelSpec
-      } | null
+        "id": "mut_<short_id>",
+        "title": "Remove `<clause>` from `<transition>`",
+        "transition": "<transition_name>",
+        "kind": "remove_guard_clause",
+        "removed_clause": "human_authorized == true",
+        "new_guard": "mode == DegradedComms and comms == Lost and sensor_agreement == true",
+        "mutated_model": { "name": "...", "variables": { ... }, "transitions": [ ... ] }
+      }
     }
   ]
 }
 """
 
 
-def _llm_draft(req: SpecDraftRequest) -> Optional[SpecDraftResponse]:
+def _llm_draft(
+    req: SpecDraftRequest,
+) -> Tuple[Optional[SpecDraftResponse], Optional[str]]:
+    """Returns (response, error_message). One of them is None.
+
+    We surface the error string so the calling endpoint can include a
+    short diagnostic in the response's `warnings` list. We deliberately
+    truncate so we never leak large response bodies into the UI.
+    """
     try:
         from openai import OpenAI  # type: ignore
 
@@ -271,8 +386,6 @@ def _llm_draft(req: SpecDraftRequest) -> Optional[SpecDraftResponse]:
         )
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
-        # Validate against our pydantic schema. If the LLM produced something
-        # we can't parse safely, return None so the caller falls back.
         parsed = SpecDraftResponse.model_validate(
             {
                 "model": data.get("model"),
@@ -283,23 +396,30 @@ def _llm_draft(req: SpecDraftRequest) -> Optional[SpecDraftResponse]:
                 "warnings": [],
             }
         )
-        # Defensive: validate the drafted model with our structural checks.
         validate_model(parsed.model)
         for p in parsed.properties:
             validate_property(p)
-        return parsed
-    except Exception:
-        return None
+        return parsed, None
+    except Exception as exc:
+        return None, _short_err(exc)
 
 
-def _llm_review(req: SpecReviewRequest) -> Optional[SpecReviewResponse]:
+def _llm_review(
+    req: SpecReviewRequest,
+) -> Tuple[Optional[SpecReviewResponse], Optional[str]]:
     try:
         from openai import OpenAI  # type: ignore
 
         client = OpenAI()
         user_msg = (
             "Here is the model and the safety properties:\n\n"
-            + json.dumps({"model": req.model.model_dump(), "properties": [p.model_dump() for p in req.properties]}, indent=2)
+            + json.dumps(
+                {
+                    "model": req.model.model_dump(),
+                    "properties": [p.model_dump() for p in req.properties],
+                },
+                indent=2,
+            )
         )
         if req.description:
             user_msg += f"\n\nOriginal description:\n{req.description}"
@@ -322,15 +442,20 @@ def _llm_review(req: SpecReviewRequest) -> Optional[SpecReviewResponse]:
                 "warnings": [],
             }
         )
-        # Defensive validation of each hypothesis's mutated model / property.
         for hyp in parsed.hypotheses:
             if hyp.mutation is not None:
                 validate_model(hyp.mutation.mutated_model)
             if hyp.property is not None:
                 validate_property(hyp.property)
-        return parsed
-    except Exception:
-        return None
+        return parsed, None
+    except Exception as exc:
+        return None, _short_err(exc)
+
+
+def _short_err(exc: Exception) -> str:
+    msg = f"{type(exc).__name__}: {exc}"
+    # Keep it terse so we never leak large response payloads.
+    return (msg[:240] + "…") if len(msg) > 240 else msg
 
 
 # ---------------------------------------------------------------------------

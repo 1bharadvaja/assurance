@@ -8,4 +8,6 @@ httpx==0.28.1
 # Optional — only used by the Review Pipeline when OPENAI_API_KEY is set.
 # The deterministic fallback path doesn't import openai, so missing the
 # package just means "no LLM drafting".
-openai==1.55.0
+# 1.59.0+ stopped passing the removed `proxies` kwarg to httpx (we pin
+# httpx==0.28 above, which dropped that kwarg).
+openai==1.59.5
