@@ -174,6 +174,57 @@ When an LLM key is configured we **never** silently route a railway
 prompt to a railway template — the LLM is always asked to draft, and
 the validation loop is what pushes it toward a checkable model.
 
+### Benchmark: hypothesis-guided vs exhaustive mutation search
+
+`backend/evals/compare_search_strategies.py` measures how much the
+hypothesis layer actually buys us. It compares two strategies on the
+same scenario, with the same `Verifier` + `diff_results` pipeline:
+
+1. **Exhaustive mutation search.** Mechanically enumerate one
+   candidate per (transition, top-level guard clause) by removing the
+   clause, plus one candidate per transition by disabling it.
+2. **Hypothesis-guided search.** Take the deterministic reviewer's
+   small set of grounded mutations (same routine the live app uses
+   for grounded hypothesis generation).
+
+Both feed the same verifier and the same diff. The benchmark records
+candidate count, valid-candidate count, solver-call count, total
+solver wall-clock time, time-to-first-confirmed-failure, and the names
+of the failed properties.
+
+Run it:
+
+```bash
+cd backend
+source .venv/bin/activate
+python evals/compare_search_strategies.py --scenario railway_crossing --bound 10
+```
+
+Sample output on `railway_crossing`:
+
+```
+Strategy                Candidates  Solver calls  Confirmed    Time to first   Total time
+-----------------------------------------------------------------------------------------
+Exhaustive mutations            30           150          7           0.803s       8.207s
+Hypothesis-guided                4            20          2           0.282s       1.091s
+
+Hypothesis-guided used 20 solver calls vs 150 exhaustive (13.3% of the exhaustive budget).
+Note: exhaustive search found 7 confirmed failures vs 2 guided. Properties found only by
+exhaustive: ['train_detection_reaches_gate_down']
+```
+
+JSON artifact written under `backend/evals/outputs/`. The honest
+claim — also printed by the script — is:
+
+> Hypothesis guidance does not make Z3 faster per query. It reduces
+> how many candidate mutations we ask Z3 to check.
+
+LLM planning / drafting time is **deliberately excluded** from this
+benchmark — the comparison is about solver-search reduction, not
+end-to-end latency. Exhaustive may also surface confirmed failures
+that the guided set misses; the script reports both honestly so the
+trade-off is visible.
+
 ### Enabling LLM drafting + review
 
 Set `OPENAI_API_KEY` on the backend (as an HF Space secret or local env

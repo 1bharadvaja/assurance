@@ -1,0 +1,435 @@
+{
+  "scenario": "railway_crossing",
+  "bound": 10,
+  "timestamp": "2026-05-26T23:22:15.112772+00:00",
+  "claim": "Hypothesis guidance does not make Z3 faster per query. It reduces how many candidate mutations we ask Z3 to check.",
+  "baseline": {
+    "total_properties": 5,
+    "preexisting_failures": []
+  },
+  "exhaustive": {
+    "meta": {
+      "candidates": 30,
+      "valid_candidates": 30,
+      "solver_calls": 150,
+      "total_solver_time_s": 8.2069,
+      "time_to_first_confirmed_s": 0.8026,
+      "confirmed_failures": 7,
+      "confirmed_property_names": [
+        "no_pass_without_gate_down",
+        "sensor_fault_reaches_fault_mode",
+        "train_detection_reaches_gate_down"
+      ]
+    },
+    "candidates": [
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_fault",
+        "removed_clause": "gate_sensor_fault == true",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.24710233369842172,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_fault",
+        "removed_clause": "mode != Fault",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.29576604114845395,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "enter_fault",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "sensor_fault_reaches_fault_mode"
+        ],
+        "longest_trace": 4,
+        "solver_time_s": 0.25851633306592703,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "train_detected_warning",
+        "removed_clause": "train_detected == true",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.26321758423000574,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "train_detected_warning",
+        "removed_clause": "mode == Idle",
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "train_detection_reaches_gate_down"
+        ],
+        "longest_trace": 9,
+        "solver_time_s": 0.2980355420149863,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "train_detected_warning",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "train_detection_reaches_gate_down"
+        ],
+        "longest_trace": 5,
+        "solver_time_s": 0.24752220790833235,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "lower_gate",
+        "removed_clause": "mode == Warning",
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "train_detection_reaches_gate_down"
+        ],
+        "longest_trace": 9,
+        "solver_time_s": 0.27774258283898234,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "lower_gate",
+        "removed_clause": "warning_lights_active == true",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.27914666710421443,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "lower_gate",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "train_detection_reaches_gate_down"
+        ],
+        "longest_trace": 11,
+        "solver_time_s": 0.25748337525874376,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "gate_reaches_down",
+        "removed_clause": "mode == LoweringGate",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.23852070793509483,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "gate_reaches_down",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "train_detection_reaches_gate_down"
+        ],
+        "longest_trace": 7,
+        "solver_time_s": 0.2508176672272384,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "detect_train",
+        "removed_clause": "train_detected == false",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.28823537519201636,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "detect_train",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.269789082929492,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "gate_sensor_fails",
+        "removed_clause": "gate_sensor_fault == false",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.278118500020355,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "gate_sensor_fails",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.268908082973212,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "gate_sensor_confirms_down",
+        "removed_clause": "gate_fully_down == false",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.28943129209801555,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "gate_sensor_confirms_down",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.2752142078243196,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_train_passing",
+        "removed_clause": "mode == GateDown",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.27906200010329485,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_train_passing",
+        "removed_clause": "gate_fully_down == true",
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "no_pass_without_gate_down"
+        ],
+        "longest_trace": 9,
+        "solver_time_s": 0.2805522498674691,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_train_passing",
+        "removed_clause": "warning_lights_active == true",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.28770129196345806,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_train_passing",
+        "removed_clause": "gate_sensor_fault == false",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.28642600029706955,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "enter_train_passing",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.26059770910069346,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "train_clears",
+        "removed_clause": "mode == TrainPassing",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.27655141707509756,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "train_clears",
+        "removed_clause": "train_cleared == false",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.287563624791801,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "train_clears",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.26445812499150634,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "raise_gate",
+        "removed_clause": "mode == TrainPassing",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.277406457811594,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "raise_gate",
+        "removed_clause": "train_cleared == true",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.28652524994686246,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "raise_gate",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.2678248747251928,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "return_to_idle",
+        "removed_clause": "mode == RaisingGate",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.27690812526270747,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "return_to_idle",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.27940633334219456,
+        "validation_error": null
+      }
+    ]
+  },
+  "guided": {
+    "meta": {
+      "candidates": 4,
+      "valid_candidates": 4,
+      "solver_calls": 20,
+      "total_solver_time_s": 1.0908,
+      "time_to_first_confirmed_s": 0.2824,
+      "confirmed_failures": 2,
+      "confirmed_property_names": [
+        "no_pass_without_gate_down",
+        "sensor_fault_reaches_fault_mode"
+      ]
+    },
+    "candidates": [
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_train_passing",
+        "removed_clause": "gate_fully_down == true",
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "no_pass_without_gate_down"
+        ],
+        "longest_trace": 9,
+        "solver_time_s": 0.28195662470534444,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_train_passing",
+        "removed_clause": "warning_lights_active == true",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.286658207885921,
+        "validation_error": null
+      },
+      {
+        "kind": "remove_guard_clause",
+        "transition": "enter_train_passing",
+        "removed_clause": "gate_sensor_fault == false",
+        "valid": true,
+        "classification": "no_counterexample",
+        "failed_properties": [],
+        "longest_trace": 0,
+        "solver_time_s": 0.27553254179656506,
+        "validation_error": null
+      },
+      {
+        "kind": "disable_transition",
+        "transition": "enter_fault",
+        "removed_clause": null,
+        "valid": true,
+        "classification": "confirmed_failure",
+        "failed_properties": [
+          "sensor_fault_reaches_fault_mode"
+        ],
+        "longest_trace": 4,
+        "solver_time_s": 0.24486445914953947,
+        "validation_error": null
+      }
+    ]
+  }
+}
