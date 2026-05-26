@@ -242,12 +242,14 @@ function RepairPanel({
     );
   }
 
+  const copy = repairCopy(repair, result);
+
   return (
     <div className="mt-4 space-y-3 rounded border border-line bg-ink-50 px-4 py-3">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
           <div className="text-[11px] uppercase tracking-wider text-ink-500">
-            Iterate on this model
+            {copy.header}
           </div>
           <p className="mt-1 text-[12.5px] text-ink-700">{repair.rationale}</p>
         </div>
@@ -263,16 +265,12 @@ function RepairPanel({
           )}
         >
           {inFlight && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          {applied
-            ? "Repair applied"
-            : inFlight
-            ? "Applying & re-verifying…"
-            : "Apply repair and re-verify"}
+          {applied ? copy.appliedLabel : inFlight ? copy.inFlightLabel : copy.idleLabel}
         </button>
       </div>
 
       <pre className="overflow-x-auto rounded border border-line bg-paper p-2 font-mono text-[11.5px] text-ink-800">
-        {`+ ${repair.add_predicate}\n  on ${repair.transition}.guard`}
+        {copy.preview}
       </pre>
 
       {error && (
@@ -286,6 +284,50 @@ function RepairPanel({
       )}
     </div>
   );
+}
+
+interface RepairCopy {
+  header: string;
+  idleLabel: string;
+  inFlightLabel: string;
+  appliedLabel: string;
+  preview: string;
+}
+
+function repairCopy(
+  repair: import("../lib/types").RepairSpec,
+  result: HypothesisCheckResult,
+): RepairCopy {
+  switch (repair.kind) {
+    case "restore_transition":
+      return {
+        header: "Undo the disabled-transition mutation",
+        idleLabel: "Restore transition and check again",
+        inFlightLabel: "Restoring & re-verifying…",
+        appliedLabel: "Transition restored",
+        preview: `+ restore transition \`${repair.transition}\` from baseline`,
+      };
+    case "restore_guard_clause":
+      return {
+        header: "Undo the removed-clause mutation",
+        idleLabel: "Restore guard and check again",
+        inFlightLabel: "Restoring & re-verifying…",
+        appliedLabel: "Guard restored",
+        preview: `+ ${repair.add_predicate ?? "<clause>"}\n  on ${repair.transition}.guard`,
+      };
+    case "strengthen_guard":
+    default:
+      // `result` is reserved for future per-hypothesis hints; unused for
+      // now but kept in the signature so callers can pass it uniformly.
+      void result;
+      return {
+        header: "Iterate on this model",
+        idleLabel: "Apply repair and re-verify",
+        inFlightLabel: "Applying & re-verifying…",
+        appliedLabel: "Repair applied",
+        preview: `+ ${repair.add_predicate ?? ""}\n  on ${repair.transition}.guard`,
+      };
+  }
 }
 
 function PostRepairVerifyView({

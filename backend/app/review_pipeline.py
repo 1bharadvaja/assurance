@@ -41,6 +41,7 @@ from .models import (
     ModelSpec,
     PropertySpec,
     RegressionEntry,
+    RepairSpec,
     ReviewLogItem,
     RiskHypothesis,
     SpecDraftRequest,
@@ -355,6 +356,14 @@ def check_hypotheses(req: HypothesisCheckRequest) -> HypothesisCheckResponse:
                 summary, regressions = diff_results(
                     old_results, new_results, properties, hyp.mutation.mutated_model
                 )
+                # If the diff didn't already attach a strengthen_guard
+                # template repair, synthesise the domain-general
+                # "undo the mutation" repair for the user. This is what
+                # makes the disable_transition / remove_guard_clause
+                # findings actionable instead of dead ends.
+                regressions = _attach_undo_repairs(
+                    regressions, hyp, base
+                )
                 diff = AssuranceDiffResponse(
                     summary=summary, results=new_results, regressions=regressions
                 )
@@ -424,6 +433,63 @@ def _classify_diff(diff: AssuranceDiffResponse) -> str:
     if diff.regressions:
         return "confirmed_failure"
     return "no_counterexample"
+
+
+def _attach_undo_repairs(
+    regressions: List[RegressionEntry],
+    hyp: "RiskHypothesis",
+    base_model: "ModelSpec",
+) -> List[RegressionEntry]:
+    """For ``disable_transition`` and ``remove_guard_clause`` hypotheses,
+    synthesise a generic ``restore_*`` ``RepairSpec`` so the UI can
+    offer "undo the mutation and re-verify" as the obvious next action.
+
+    We only fill in repairs that weren't already provided by the
+    template-driven ``suggest_repair`` path (used for
+    ``strengthen_guard``). If a regression already has a suggested
+    repair we leave it alone.
+    """
+    if hyp.mutation is None:
+        return regressions
+
+    if hyp.mutation.kind == "disable_transition":
+        original = next(
+            (t for t in base_model.transitions if t.name == hyp.mutation.transition),
+            None,
+        )
+        if original is None:
+            return regressions
+        synth = RepairSpec(
+            kind="restore_transition",
+            transition=hyp.mutation.transition,
+            original_transition=original,
+            rationale=(
+                f"Re-enable `{hyp.mutation.transition}` by restoring its "
+                "original guard, updates, and reactive flag from the "
+                "baseline model."
+            ),
+        )
+        return [
+            r if r.suggested_repair is not None else r.model_copy(update={"suggested_repair": synth})
+            for r in regressions
+        ]
+
+    if hyp.mutation.kind == "remove_guard_clause" and hyp.mutation.removed_clause:
+        synth = RepairSpec(
+            kind="restore_guard_clause",
+            transition=hyp.mutation.transition,
+            add_predicate=hyp.mutation.removed_clause,
+            rationale=(
+                f"Add `{hyp.mutation.removed_clause}` back to "
+                f"`{hyp.mutation.transition}`."
+            ),
+        )
+        return [
+            r if r.suggested_repair is not None else r.model_copy(update={"suggested_repair": synth})
+            for r in regressions
+        ]
+
+    return regressions
 
 
 # ---------------------------------------------------------------------------

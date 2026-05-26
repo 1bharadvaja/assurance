@@ -130,14 +130,45 @@ class VerifyResponse(BaseModel):
     summary: VerifySummary
 
 
+RepairKind = Literal[
+    # Add a missing predicate to a culprit transition's guard.
+    "strengthen_guard",
+    # Re-insert a transition that was disabled (removed) by a mutation.
+    "restore_transition",
+    # Conjoin back a specific clause that was removed from a guard.
+    "restore_guard_clause",
+]
+
+
 class RepairSpec(BaseModel):
+    """A concrete edit the UI can apply to the model.
+
+    Three kinds are supported. ``strengthen_guard`` is the original
+    template-driven path that adds a missing predicate. The two
+    ``restore_*`` kinds are synthesised when a hypothesis is confirmed
+    as a failure — they let the UI undo the hypothesised mutation and
+    re-verify, which doubles as a useful "the baseline is fine" demo.
+
+    Field meanings by kind:
+
+    - ``strengthen_guard``: ``add_predicate`` + ``new_guard`` describe
+      the new conjunct and the full replacement guard.
+    - ``restore_guard_clause``: ``add_predicate`` is the clause to put
+      back. ``new_guard`` is optional (the apply step rebuilds the
+      guard from the model's current clauses + the restored one).
+    - ``restore_transition``: ``original_transition`` carries the full
+      ``TransitionSpec`` that was removed by the mutation; apply_repair
+      re-inserts it.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["strengthen_guard"]
+    kind: RepairKind
     transition: str
-    add_predicate: str
-    new_guard: str
-    rationale: str
+    add_predicate: Optional[str] = None
+    new_guard: Optional[str] = None
+    original_transition: Optional[TransitionSpec] = None
+    rationale: str = ""
 
 
 class RegressionEntry(BaseModel):

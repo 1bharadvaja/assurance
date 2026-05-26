@@ -220,16 +220,49 @@ export async function applyRepair(
       repair,
     });
   }
-  // In demo mode we apply the strengthening client-side so the static
-  // build can complete the story without a backend.
+  // In demo mode we apply the repair client-side so the static build
+  // can complete the story without a backend. The three supported
+  // kinds mirror backend/app/repair.py.
   const next: ModelSpec = JSON.parse(JSON.stringify(model));
-  if (repair.kind !== "strengthen_guard") {
-    throw new BackendError(`Unsupported repair kind in demo mode: ${repair.kind}`);
+  if (repair.kind === "strengthen_guard") {
+    const t = next.transitions.find((tr) => tr.name === repair.transition);
+    if (!t) throw new BackendError(`Transition not found: ${repair.transition}`);
+    if (!repair.new_guard) {
+      throw new BackendError("strengthen_guard requires new_guard");
+    }
+    t.guard = repair.new_guard;
+    return { model: next };
   }
-  const t = next.transitions.find((tr) => tr.name === repair.transition);
-  if (!t) throw new BackendError(`Transition not found: ${repair.transition}`);
-  t.guard = repair.new_guard;
-  return { model: next };
+  if (repair.kind === "restore_transition") {
+    if (!repair.original_transition) {
+      throw new BackendError(
+        "restore_transition requires original_transition payload"
+      );
+    }
+    if (!next.transitions.find((t) => t.name === repair.transition)) {
+      next.transitions = [
+        ...next.transitions,
+        JSON.parse(JSON.stringify(repair.original_transition)),
+      ];
+    }
+    return { model: next };
+  }
+  if (repair.kind === "restore_guard_clause") {
+    if (!repair.add_predicate) {
+      throw new BackendError("restore_guard_clause requires add_predicate");
+    }
+    const t = next.transitions.find((tr) => tr.name === repair.transition);
+    if (!t) throw new BackendError(`Transition not found: ${repair.transition}`);
+    const norm = (s: string) => s.trim().replace(/\s+/g, " ");
+    const wanted = norm(repair.add_predicate);
+    const guard = (t.guard ?? "").trim();
+    const clauses = guard ? guard.split(/\s+and\s+/i).map(norm).filter(Boolean) : [];
+    const trimmed = clauses.filter((c) => c.toLowerCase() !== "true");
+    if (!trimmed.includes(wanted)) trimmed.push(repair.add_predicate);
+    t.guard = trimmed.length > 0 ? trimmed.join(" and ") : "true";
+    return { model: next };
+  }
+  throw new BackendError(`Unsupported repair kind in demo mode: ${repair.kind}`);
 }
 
 // ---------------------------------------------------------------------------

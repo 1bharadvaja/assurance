@@ -67,11 +67,20 @@ export interface VerifyResponse {
   summary: VerifySummary;
 }
 
+export type RepairKind =
+  | "strengthen_guard"
+  | "restore_transition"
+  | "restore_guard_clause";
+
 export interface RepairSpec {
-  kind: "strengthen_guard";
+  kind: RepairKind;
   transition: string;
-  add_predicate: string;
-  new_guard: string;
+  /** Used by strengthen_guard and restore_guard_clause. */
+  add_predicate?: string | null;
+  /** Used by strengthen_guard. */
+  new_guard?: string | null;
+  /** Used by restore_transition — the original spec to re-insert. */
+  original_transition?: TransitionSpec | null;
   rationale: string;
 }
 

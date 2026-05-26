@@ -299,25 +299,39 @@ export function ReviewPipeline() {
   ) {
     if (!draft || !activeModel || !regression.suggested_repair) return;
     const hypId = result.hypothesis.id;
+    const repair = regression.suggested_repair;
+    const isUndoMutation =
+      repair.kind === "restore_transition" || repair.kind === "restore_guard_clause";
+
     setPostRepair((cur) => ({
       ...cur,
       [hypId]: { verify: null, inFlight: true, error: null },
     }));
     try {
-      const { model: patched } = await applyRepairApi(
-        activeModel,
-        regression.suggested_repair
-      );
-      // Replace the working model with the patched one. Reset edits to
-      // derive from the new model so the editor in Stage 2 reflects it.
-      const newEdits: Record<string, TransitionEdit> = {};
-      for (const t of patched.transitions) {
-        newEdits[t.name] = buildEditFromTransition(t);
+      // For "undo the mutation" repairs we apply against the hypothesis's
+      // mutated_model (so the result rolls the mutation back) and we
+      // verify in-place without replacing the user's active model — the
+      // active model already has the original transition / clause.
+      // For strengthen_guard we keep the legacy flow: apply to the
+      // active model and adopt the patched version going forward.
+      const targetModel =
+        isUndoMutation && result.hypothesis.mutation?.mutated_model
+          ? result.hypothesis.mutation.mutated_model
+          : activeModel;
+
+      const { model: patched } = await applyRepairApi(targetModel, repair);
+
+      if (!isUndoMutation) {
+        // strengthen_guard path: adopt the patched model as the new
+        // working model so Stage 2's editor reflects the fix.
+        const newEdits: Record<string, TransitionEdit> = {};
+        for (const t of patched.transitions) {
+          newEdits[t.name] = buildEditFromTransition(t);
+        }
+        setEdits(newEdits);
+        setDraft((cur) => (cur ? { ...cur, model: patched } : cur));
       }
-      setEdits(newEdits);
-      // Update the draft's model so the activeModel reflects the patch.
-      setDraft((cur) => (cur ? { ...cur, model: patched } : cur));
-      // Verify the patched model against the original safety properties.
+
       const v = await verifyApi({
         model: patched,
         properties: draft.properties,
