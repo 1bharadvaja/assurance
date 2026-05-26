@@ -2,9 +2,10 @@
 
 import clsx from "clsx";
 import { Loader2 } from "lucide-react";
-import { CounterexampleReplay } from "./CounterexampleReplay";
+import { FailureExplanation } from "./FailureExplanation";
+import { GenericTraceTimeline } from "./GenericTraceTimeline";
 import { RawTraceDisclosure } from "./RawTraceDisclosure";
-import { RootCauseCard } from "./RootCauseCard";
+import { WhereItBrokeCard } from "./WhereItBrokeCard";
 import type {
   HypothesisCheckResult,
   ModelSpec,
@@ -181,11 +182,17 @@ function ResultBlock({
             baseModel={baseModel}
             properties={properties}
             bound={bound}
+            hypothesis={hypothesis}
           />
         )}
 
         {classification === "confirmed_failure" && verify && (
-          <ConfirmedFromVerify verify={verify} bound={bound} baseModel={baseModel} />
+          <ConfirmedFromVerify
+            verify={verify}
+            bound={bound}
+            baseModel={baseModel}
+            hypothesis={hypothesis}
+          />
         )}
 
         {classification === "confirmed_failure" && diff && (
@@ -367,11 +374,13 @@ function ConfirmedFailure({
   baseModel,
   properties,
   bound,
+  hypothesis,
 }: {
   diff: import("../lib/types").AssuranceDiffResponse;
   baseModel: ModelSpec;
   properties: PropertySpec[];
   bound: number;
+  hypothesis: HypothesisCheckResult["hypothesis"];
 }) {
   const reg = diff.regressions[0];
   if (!reg) {
@@ -381,29 +390,33 @@ function ConfirmedFailure({
       </p>
     );
   }
-  const failedProp = properties.find((p) => p.name === reg.property);
-  const safeTransition = baseModel.transitions.find(
-    (t) => t.name === reg.culprit_transition?.name
-  );
+  const failedProp = properties.find((p) => p.name === reg.property) ?? null;
+  const baseTransition =
+    baseModel.transitions.find((t) => t.name === reg.culprit_transition?.name) ??
+    (hypothesis.mutation
+      ? baseModel.transitions.find((t) => t.name === hypothesis.mutation?.transition)
+      : null) ??
+    null;
 
   return (
     <div className="space-y-4">
-      <p className="text-[12.5px] text-red-900">
-        The solver found a reachable execution that violates{" "}
-        <span className="font-medium">{failedProp?.title || reg.property}</span>.
-      </p>
-      <CounterexampleReplay
+      <FailureExplanation hypothesis={hypothesis} property={failedProp} />
+      <GenericTraceTimeline
         trace={reg.counterexample}
-        propertyTitle={failedProp?.title || reg.property}
+        model={baseModel}
+        property={failedProp}
+        title={failedProp?.title || reg.property}
       />
-      {reg.culprit_transition && (
-        <RootCauseCard
-          transitionName={reg.culprit_transition.name}
-          missingPredicate={reg.suggested_repair?.add_predicate || "—"}
-          safeGuard={safeTransition?.guard || "—"}
-          newGuard={reg.culprit_transition.guard}
-        />
-      )}
+      <WhereItBrokeCard
+        mutation={hypothesis.mutation ?? null}
+        property={failedProp}
+        baseTransition={baseTransition}
+        newGuard={
+          hypothesis.mutation?.new_guard ??
+          reg.culprit_transition?.guard ??
+          null
+        }
+      />
       <RawTraceDisclosure
         trace={reg.counterexample}
         columns={Object.keys(baseModel.variables)}
@@ -421,24 +434,33 @@ function ConfirmedFromVerify({
   verify,
   bound,
   baseModel,
+  hypothesis,
 }: {
   verify: import("../lib/types").VerifyResponse;
   bound: number;
   baseModel: ModelSpec;
+  hypothesis: HypothesisCheckResult["hypothesis"];
 }) {
   const failed = verify.results.find((r) => r.status === "fail");
   if (!failed || !failed.counterexample) {
     return null;
   }
+  // Resolve the PropertySpec — verify results only carry the name/title.
+  const failedProp: PropertySpec | null =
+    (hypothesis.property && hypothesis.property.name === failed.property
+      ? hypothesis.property
+      : null) ?? null;
   return (
     <div className="space-y-4">
-      <p className="text-[12.5px] text-red-900">
-        The property <span className="font-medium">{failed.title || failed.property}</span>{" "}
-        fails on the base model.
-      </p>
-      <CounterexampleReplay
+      <FailureExplanation hypothesis={hypothesis} property={failedProp} />
+      <GenericTraceTimeline
         trace={failed.counterexample}
-        propertyTitle={failed.title || failed.property}
+        model={baseModel}
+        property={failedProp}
+        title={failed.title || failed.property}
+        violationIndex={
+          failed.violation_time ?? failed.counterexample.length - 1
+        }
       />
       <RawTraceDisclosure
         trace={failed.counterexample}
