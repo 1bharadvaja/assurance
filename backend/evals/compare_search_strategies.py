@@ -57,12 +57,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # Make ``app`` importable when run as a script from the backend dir.
 _BACKEND = Path(__file__).resolve().parent.parent
@@ -122,6 +123,9 @@ class StrategyMeta:
     time_to_first_confirmed_s: Optional[float]
     confirmed_failures: int
     confirmed_property_names: List[str]
+    # Properties confirmed-failed by SOME strategy but not by this one.
+    # Filled in after all strategies have run; empty until then.
+    missed_properties: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +177,253 @@ def generate_guided_candidates(
             )
         )
     return out, hyps
+
+
+# ---------------------------------------------------------------------------
+# Property-coverage augmentation
+#
+# Guided search is a triage strategy. The reviewer prioritises the
+# clearest unsafe weakenings, but it can miss properties whose response
+# path the reviewer never thought to disable. This augmentation walks
+# each property and — only if no existing candidate already touches it
+# — emits at most ONE extra candidate per property, capped at
+# ``max_total`` overall. This improves recall without blowing the
+# guided budget out toward exhaustive search.
+# ---------------------------------------------------------------------------
+
+
+_MODE_EQ_RE = re.compile(r"\bmode\s*==\s*([A-Za-z_][A-Za-z0-9_]*)")
+_PRE_STATE_RE = re.compile(r"^\s*mode\s*==\s*[A-Za-z_][A-Za-z0-9_]*\s*$")
+
+
+def _property_modes(p: PropertySpec) -> Set[str]:
+    out: Set[str] = set()
+    for expr in (p.condition, p.trigger, p.response):
+        if expr:
+            out.update(_MODE_EQ_RE.findall(expr))
+    return out
+
+
+def _response_modes(p: PropertySpec) -> Set[str]:
+    if p.type != "bounded_response" or not p.response:
+        return set()
+    return set(_MODE_EQ_RE.findall(p.response))
+
+
+def _property_variables(p: PropertySpec, known: Set[str]) -> Set[str]:
+    out: Set[str] = set()
+    for expr in (p.condition, p.trigger, p.response):
+        if not expr:
+            continue
+        for v in known:
+            if re.search(rf"\b{re.escape(v)}\b", expr):
+                out.add(v)
+    return out
+
+
+def _candidate_touches_property(
+    c: CandidateResult,
+    p: PropertySpec,
+    base: ModelSpec,
+    known_vars: Set[str],
+) -> bool:
+    """Per-candidate heuristic — used only for invariant coverage.
+
+    For invariants, a single candidate is enough to "touch" the property
+    if it enters a named bad-mode or mutates a relevant non-mode
+    variable. `mode` itself is excluded from variable-overlap checks
+    because every mode transition mutates it, which would trivially
+    cover every property.
+
+    For bounded_response see ``_is_property_covered`` — disjunctive
+    responses need every disjunct accounted for, which is a set-level
+    check rather than a per-candidate one.
+    """
+    trans = next((t for t in base.transitions if t.name == c.transition), None)
+    if trans is None:
+        return False
+    target_mode = trans.updates.get("mode")
+    prop_modes = _property_modes(p)
+    non_mode_vars = {v for v in known_vars if v != "mode"}
+    prop_vars = _property_variables(p, non_mode_vars)
+    if target_mode and target_mode in prop_modes:
+        return True
+    if set(trans.updates.keys()) & prop_vars:
+        return True
+    if c.removed_clause:
+        for v in prop_vars:
+            if re.search(rf"\b{re.escape(v)}\b", c.removed_clause):
+                return True
+    return False
+
+
+def _is_property_covered(
+    candidates: List[CandidateResult],
+    p: PropertySpec,
+    base: ModelSpec,
+    known_vars: Set[str],
+) -> bool:
+    """Set-level coverage check.
+
+    Bounded-response responses can be disjunctive (e.g.
+    ``mode == GateDown or mode == Fault``). A single mutation that
+    blocks one disjunct doesn't actually exercise the property — the
+    other disjunct can still satisfy it. So we require EVERY response
+    mode to be covered by at least one candidate before treating the
+    property as covered.
+
+    Invariants are checked per-candidate (any matching candidate
+    suffices).
+    """
+    if p.type == "bounded_response":
+        response_modes = _response_modes(p)
+        if not response_modes:
+            # Response doesn't reference any concrete mode — fall back
+            # to per-candidate to avoid blocking on something we can't
+            # decompose.
+            return any(
+                _candidate_touches_property(c, p, base, known_vars)
+                for c in candidates
+            )
+        covered: Set[str] = set()
+        for c in candidates:
+            trans = next(
+                (t for t in base.transitions if t.name == c.transition),
+                None,
+            )
+            if trans is None:
+                continue
+            tm = trans.updates.get("mode")
+            if tm in response_modes:
+                covered.add(tm)
+        return response_modes.issubset(covered)
+
+    # Invariants: per-candidate touches check is sufficient.
+    return any(
+        _candidate_touches_property(c, p, base, known_vars) for c in candidates
+    )
+
+
+def _coverage_candidate_for(
+    p: PropertySpec,
+    base: ModelSpec,
+    existing: List[CandidateResult],
+    existing_keys: Set[Tuple[str, str, str]],
+    known_vars: Set[str],
+) -> Optional[CandidateResult]:
+    """Best-effort: try to emit one candidate that exercises the
+    property's response/condition path. Returns None when nothing
+    sensible can be generated (e.g. property doesn't mention any mode)."""
+    if p.type == "bounded_response":
+        # Disable a transition that produces the FIRST response mode
+        # not already covered by an existing candidate. For disjunctive
+        # responses (e.g. `mode == GateDown or mode == Fault`) this
+        # prefers the disjunct still lacking a candidate.
+        already_covered_modes: Set[str] = set()
+        for c in existing:
+            trans = next(
+                (t for t in base.transitions if t.name == c.transition),
+                None,
+            )
+            if trans is not None:
+                tm = trans.updates.get("mode")
+                if tm in _response_modes(p):
+                    already_covered_modes.add(tm)
+        for target_mode in _response_modes(p):
+            if target_mode in already_covered_modes:
+                continue
+            for t in base.transitions:
+                if t.updates.get("mode") != target_mode:
+                    continue
+                key = ("disable_transition", t.name, "")
+                if key in existing_keys:
+                    continue
+                return CandidateResult(
+                    kind="disable_transition", transition=t.name
+                )
+        return None
+
+    if p.type == "invariant":
+        prop_modes = _property_modes(p)
+        prop_vars = _property_variables(p, known_vars)
+        # First pass: prefer remove_guard_clause on a non-pre-state
+        # clause that names one of the property's variables.
+        for t in base.transitions:
+            if t.updates.get("mode") not in prop_modes:
+                continue
+            for clause in split_top_conjuncts(t.guard or ""):
+                if _PRE_STATE_RE.match(clause):
+                    continue
+                names_a_prop_var = any(
+                    re.search(rf"\b{re.escape(v)}\b", clause) for v in prop_vars
+                )
+                if not names_a_prop_var:
+                    continue
+                norm = " ".join(clause.split())
+                key = ("remove_guard_clause", t.name, norm)
+                if key in existing_keys:
+                    continue
+                return CandidateResult(
+                    kind="remove_guard_clause",
+                    transition=t.name,
+                    removed_clause=clause,
+                )
+        # Fallback: disable a transition that enters the bad mode.
+        for t in base.transitions:
+            if t.updates.get("mode") not in prop_modes:
+                continue
+            key = ("disable_transition", t.name, "")
+            if key in existing_keys:
+                continue
+            return CandidateResult(
+                kind="disable_transition", transition=t.name
+            )
+        return None
+
+    return None
+
+
+def generate_coverage_candidates(
+    base: ModelSpec,
+    properties: List[PropertySpec],
+    existing: List[CandidateResult],
+    max_total: int = 30,
+) -> List[CandidateResult]:
+    """Return ``existing`` plus at most one extra candidate per property
+    that no existing candidate touches, up to a global ``max_total`` cap.
+
+    The augmentation is intentionally conservative — it never duplicates
+    an existing candidate, and it never adds more than one candidate per
+    property. The hard cap exists to prevent the guided strategy from
+    drifting toward exhaustive search.
+    """
+    if max_total <= len(existing):
+        return list(existing)
+    known_vars = set(base.variables.keys())
+    out: List[CandidateResult] = list(existing)
+    existing_keys = {
+        (c.kind, c.transition, " ".join((c.removed_clause or "").split()))
+        for c in out
+    }
+    for p in properties:
+        if len(out) >= max_total:
+            break
+        if _is_property_covered(out, p, base, known_vars):
+            continue
+        extra = _coverage_candidate_for(
+            p, base, out, existing_keys, known_vars
+        )
+        if extra is None:
+            continue
+        out.append(extra)
+        existing_keys.add(
+            (
+                extra.kind,
+                extra.transition,
+                " ".join((extra.removed_clause or "").split()),
+            )
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +524,9 @@ def run_strategy(
 # ---------------------------------------------------------------------------
 
 
-def run_eval(scenario: str, bound: int) -> dict:
+def run_eval(
+    scenario: str, bound: int, coverage_max_total: int = 30
+) -> dict:
     if scenario not in SCENARIOS:
         raise SystemExit(
             f"Unknown scenario: {scenario!r}; choose from {sorted(SCENARIOS)}"
@@ -287,6 +540,12 @@ def run_eval(scenario: str, bound: int) -> dict:
     guided_candidates, _guided_hyps = generate_guided_candidates(
         base_model, properties
     )
+    coverage_candidates = generate_coverage_candidates(
+        base_model,
+        properties,
+        guided_candidates,
+        max_total=coverage_max_total,
+    )
 
     exhaustive_results, exhaustive_meta = run_strategy(
         base_model, properties, exhaustive_candidates, bound, baseline
@@ -294,6 +553,21 @@ def run_eval(scenario: str, bound: int) -> dict:
     guided_results, guided_meta = run_strategy(
         base_model, properties, guided_candidates, bound, baseline
     )
+    coverage_results, coverage_meta = run_strategy(
+        base_model, properties, coverage_candidates, bound, baseline
+    )
+
+    # Fill `missed_properties` per strategy relative to the union of
+    # confirmed property names across ALL strategies (so each strategy's
+    # missed list is "things that some strategy demonstrated were
+    # checkable but this one didn't surface").
+    universe: Set[str] = set()
+    for m in (exhaustive_meta, guided_meta, coverage_meta):
+        universe.update(m.confirmed_property_names)
+    for m in (exhaustive_meta, guided_meta, coverage_meta):
+        m.missed_properties = sorted(
+            universe - set(m.confirmed_property_names)
+        )
 
     return {
         "scenario": scenario,
@@ -301,7 +575,9 @@ def run_eval(scenario: str, bound: int) -> dict:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "claim": (
             "Hypothesis guidance does not make Z3 faster per query. It "
-            "reduces how many candidate mutations we ask Z3 to check."
+            "reduces how many candidate mutations we ask Z3 to check. "
+            "Coverage augmentation improves recall while keeping the "
+            "guided candidate budget well below exhaustive."
         ),
         "baseline": {
             "total_properties": len(properties),
@@ -315,6 +591,10 @@ def run_eval(scenario: str, bound: int) -> dict:
             "meta": asdict(guided_meta),
             "candidates": [asdict(c) for c in guided_results],
         },
+        "guided_with_property_coverage": {
+            "meta": asdict(coverage_meta),
+            "candidates": [asdict(c) for c in coverage_results],
+        },
     }
 
 
@@ -323,16 +603,22 @@ def run_eval(scenario: str, bound: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
+_STRATEGY_ROWS = [
+    ("Exhaustive mutations", "exhaustive"),
+    ("Hypothesis-guided", "guided"),
+    ("Guided + coverage", "guided_with_property_coverage"),
+]
+
+
 def print_table(artifact: dict) -> None:
-    e = artifact["exhaustive"]["meta"]
-    g = artifact["guided"]["meta"]
     header = (
         f"{'Strategy':<22}{'Candidates':>12}{'Solver calls':>14}"
         f"{'Confirmed':>11}{'Time to first':>17}{'Total time':>13}"
     )
     print(header)
     print("-" * len(header))
-    for label, meta in (("Exhaustive mutations", e), ("Hypothesis-guided", g)):
+    for label, key in _STRATEGY_ROWS:
+        meta = artifact[key]["meta"]
         ttf = (
             f"{meta['time_to_first_confirmed_s']:.3f}s"
             if meta["time_to_first_confirmed_s"] is not None
@@ -352,32 +638,32 @@ def print_table(artifact: dict) -> None:
 def print_honest_summary(artifact: dict) -> None:
     e = artifact["exhaustive"]["meta"]
     g = artifact["guided"]["meta"]
+    c = artifact["guided_with_property_coverage"]["meta"]
     print()
     print(artifact["claim"])
     print()
     if e["solver_calls"] > 0:
-        ratio = g["solver_calls"] / e["solver_calls"]
-        print(
-            f"Hypothesis-guided used {g['solver_calls']} solver calls "
-            f"vs {e['solver_calls']} exhaustive "
-            f"({ratio:.1%} of the exhaustive budget)."
-        )
-    if e["confirmed_failures"] > g["confirmed_failures"]:
-        missed = sorted(
-            set(e["confirmed_property_names"])
-            - set(g["confirmed_property_names"])
-        )
-        print(
-            f"Note: exhaustive search found {e['confirmed_failures']} "
-            f"confirmed failures vs {g['confirmed_failures']} guided. "
-            f"Properties found only by exhaustive: {missed}"
-        )
-    elif g["confirmed_failures"] > 0 and e["confirmed_failures"] == 0:
-        print(
-            "Note: guided found a confirmed failure that exhaustive did "
-            "not — verify the exhaustive mutation set hits the relevant "
-            "transition before drawing conclusions."
-        )
+        for label, meta in (
+            ("Hypothesis-guided", g),
+            ("Guided + coverage", c),
+        ):
+            ratio = meta["solver_calls"] / e["solver_calls"]
+            print(
+                f"{label}: {meta['solver_calls']} solver calls "
+                f"vs {e['solver_calls']} exhaustive "
+                f"({ratio:.1%} of the exhaustive budget)."
+            )
+    print()
+    for label, meta in (
+        ("Exhaustive", e),
+        ("Hypothesis-guided", g),
+        ("Guided + coverage", c),
+    ):
+        missed = meta.get("missed_properties") or []
+        if missed:
+            print(f"{label} missed: {missed}")
+        else:
+            print(f"{label} missed: (none — every confirmed property surfaced)")
 
 
 def write_artifact(artifact: dict, scenario: str) -> Path:

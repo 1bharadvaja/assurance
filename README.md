@@ -177,8 +177,9 @@ the validation loop is what pushes it toward a checkable model.
 ### Benchmark: hypothesis-guided vs exhaustive mutation search
 
 `backend/evals/compare_search_strategies.py` measures how much the
-hypothesis layer actually buys us. It compares two strategies on the
-same scenario, with the same `Verifier` + `diff_results` pipeline:
+hypothesis layer actually buys us. It runs three strategies against
+the same scenario through the same `Verifier` + `diff_results`
+pipeline:
 
 1. **Exhaustive mutation search.** Mechanically enumerate one
    candidate per (transition, top-level guard clause) by removing the
@@ -186,11 +187,20 @@ same scenario, with the same `Verifier` + `diff_results` pipeline:
 2. **Hypothesis-guided search.** Take the deterministic reviewer's
    small set of grounded mutations (same routine the live app uses
    for grounded hypothesis generation).
+3. **Guided + property coverage.** Start from (2), then walk each
+   safety property. If no candidate in (2) already exercises a
+   property — for bounded responses this means every response mode
+   has at least one candidate disabling a transition that enters it
+   — add at most ONE extra candidate that does. Hard caps: max 1
+   extra per property, max 30 candidates total. The augmentation
+   never duplicates an existing candidate and never drifts toward
+   exhaustive search.
 
-Both feed the same verifier and the same diff. The benchmark records
-candidate count, valid-candidate count, solver-call count, total
-solver wall-clock time, time-to-first-confirmed-failure, and the names
-of the failed properties.
+All three feed the same verifier and the same diff. The benchmark
+records candidate count, valid-candidate count, solver-call count,
+total solver wall-clock time, time-to-first-confirmed-failure, failed
+property names, and `missed_properties` (properties confirmed-failed
+by some strategy but not this one).
 
 Run it:
 
@@ -205,25 +215,39 @@ Sample output on `railway_crossing`:
 ```
 Strategy                Candidates  Solver calls  Confirmed    Time to first   Total time
 -----------------------------------------------------------------------------------------
-Exhaustive mutations            30           150          7           0.803s       8.207s
-Hypothesis-guided                4            20          2           0.282s       1.091s
+Exhaustive mutations            30           150          7           0.761s       8.176s
+Hypothesis-guided                4            20          2           0.287s       1.107s
+Guided + coverage                5            25          3           0.276s       1.348s
 
-Hypothesis-guided used 20 solver calls vs 150 exhaustive (13.3% of the exhaustive budget).
-Note: exhaustive search found 7 confirmed failures vs 2 guided. Properties found only by
-exhaustive: ['train_detection_reaches_gate_down']
+Hypothesis-guided: 20 solver calls vs 150 exhaustive (13.3% of the exhaustive budget).
+Guided + coverage: 25 solver calls vs 150 exhaustive (16.7% of the exhaustive budget).
+
+Exhaustive missed: (none — every confirmed property surfaced)
+Hypothesis-guided missed: ['train_detection_reaches_gate_down']
+Guided + coverage missed: (none — every confirmed property surfaced)
 ```
 
 JSON artifact written under `backend/evals/outputs/`. The honest
 claim — also printed by the script — is:
 
-> Hypothesis guidance does not make Z3 faster per query. It reduces
-> how many candidate mutations we ask Z3 to check.
+> Guided search is a triage strategy. Coverage-guided search improves
+> recall while still using far fewer solver calls than exhaustive
+> mutation search. Hypothesis guidance does not make Z3 faster per
+> query; it reduces how many candidate mutations we ask Z3 to check.
 
 LLM planning / drafting time is **deliberately excluded** from this
 benchmark — the comparison is about solver-search reduction, not
-end-to-end latency. Exhaustive may also surface confirmed failures
-that the guided set misses; the script reports both honestly so the
-trade-off is visible.
+end-to-end latency.
+
+The script reports `missed_properties` per strategy so under-coverage
+is visible rather than papered over. On the railway scenario, plain
+guided misses `train_detection_reaches_gate_down` (its response is
+disjunctive — `mode == GateDown or mode == Fault` — and the
+reviewer's existing `disable enter_fault` candidate satisfies one
+disjunct but not the other). Coverage augmentation notices the
+GateDown disjunct lacks a candidate and adds exactly one
+(`disable gate_reaches_down`), closing the gap with five additional
+solver calls.
 
 ### Enabling LLM drafting + review
 
